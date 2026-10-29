@@ -1,187 +1,222 @@
 #!/usr/bin/env python3
-import json
-import requests
+import sys
+import os
+import tkinter as tk
+from tkinter import messagebox
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import requests
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 
-BASE_DIR = Path(__file__).parent
+# Aufruf aus dem .app-Bundle fixen, damit relative Pfade (client_secret.json) 
+# immer im Ordner der App liegen, auch wenn sie doppelgeklickt wird.
+if getattr(sys, 'frozen', False):
+    BASE_DIR = Path(sys.executable).resolve().parent.parent / "Resources"
+    # Falls direkt im MacOS-Ordner:
+    if not (BASE_DIR / "client_secret.json").exists():
+        BASE_DIR = Path(sys.executable).resolve().parent
+else:
+    BASE_DIR = Path(__file__).parent
+
 CLIENT_SECRETS_FILE = BASE_DIR / "client_secret.json"
 TOKEN_FILE = BASE_DIR / "token.json"
 
-# Offizielle Scopes der neuen Google Health API v4
 SCOPES = [
     "https://www.googleapis.com/auth/googlehealth.activity_and_fitness.writeonly",
     "https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly"
 ]
-
 API_BASE_URL = "https://health.googleapis.com/v4/users/me/dataTypes"
-DEFAULT_STRIDE_M = 0.62  # ca. 62 cm Schrittlänge auf dem Walking Pad
+DEFAULT_STRIDE_M = 0.62
 
 
 def get_credentials() -> Credentials:
-    """Führt beim ersten Start den Browser-Login durch und erneuert Tokens danach automatisch."""
     creds = None
     if TOKEN_FILE.exists():
         creds = Credentials.from_authorized_user_file(str(TOKEN_FILE), SCOPES)
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
-            print("🔄 Erneuere Google Access Token...")
             creds.refresh(Request())
         else:
             if not CLIENT_SECRETS_FILE.exists():
-                raise FileNotFoundError(
-                    f"❌ Datei nicht gefunden: {CLIENT_SECRETS_FILE}\n"
-                    "Bitte speichere deine heruntergeladene JSON-Datei als 'client_secret.json' im Skript-Ordner!"
-                )
+                raise FileNotFoundError(f"client_secret.json nicht gefunden in:\n{BASE_DIR}")
             flow = InstalledAppFlow.from_client_secrets_file(str(CLIENT_SECRETS_FILE), SCOPES)
             creds = flow.run_local_server(port=8080)
 
         with open(TOKEN_FILE, "w", encoding="utf-8") as f:
             f.write(creds.to_json())
-        print("✅ Authentifizierung erfolgreich! Token lokal gespeichert.\n")
-
     return creds
 
 
-def test_connection(creds: Credentials) -> bool:
-    """Liest testweise die letzten Trainings aus, um die API-Verbindung zu prüfen."""
-    url = f"{API_BASE_URL}/exercise/dataPoints?pageSize=3"
-    headers = {"Authorization": f"Bearer {creds.token}"}
-    
-    print("📡 Teste Verbindung zur Google Health API v4...")
-    res = requests.get(url, headers=headers)
-    
-    if res.ok:
-        data = res.json()
-        points = data.get("dataPoints", [])
-        print(f"✅ Verbindung steht! ({len(points)} letzte Trainings gefunden)\n")
-        return True
-    else:
-        print(f"⚠️ API-Antwort ({res.status_code}): {res.text}\n")
-        return False
+class WalkingPadApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Skandika Walking Pad Sync")
+        self.root.geometry("380x420")
+        self.root.minsize(380, 420)
+        
+        # Modernes Layout mit Padding
+        pad_options = {"padx": 15, "pady": 6}
 
+        tk.Label(root, text="🏃‍♂️ Skandika Walking Pad Logger", font=("Helvetica", 14, "bold")).pack(pady=10)
 
-def log_walking_pad_workout(
-    creds: Credentials,
-    start_dt_local: datetime,
-    duration_min: float,
-    distance_km: float,
-    speed_kmh: float,
-    steps: int
-):
-    """Schreibt das Laufband-Training samt Schritten, Tempo und Distanz in die Google Health API v4."""
-    duration_sec = int(duration_min * 60)
-    end_dt_local = start_dt_local + timedelta(seconds=duration_sec)
+        # 1. Dauer
+        frame_dur = tk.Frame(root)
+        frame_dur.pack(fill="x", **pad_options)
+        tk.Label(frame_dur, text="Dauer (Minuten):", width=18, anchor="w").pack(side="left")
+        self.entry_duration = tk.Entry(frame_dur, width=12)
+        self.entry_duration.pack(side="right")
+        self.entry_duration.insert(0, "30")
+        self.entry_duration.bind("<KeyRelease>", self.calculate_defaults)
 
-    # Lokalen UTC-Offset berechnen (z. B. +3600s im Winter / +7200s im Sommer)
-    utc_offset_sec = int(start_dt_local.astimezone().utcoffset().total_seconds())
-    offset_str = f"{utc_offset_sec}s"
+        # 2. Geschwindigkeit
+        frame_spd = tk.Frame(root)
+        frame_spd.pack(fill="x", **pad_options)
+        tk.Label(frame_spd, text="Tempo (km/h):", width=18, anchor="w").pack(side="left")
+        self.entry_speed = tk.Entry(frame_spd, width=12)
+        self.entry_speed.pack(side="right")
+        self.entry_speed.insert(0, "3.2")
+        self.entry_speed.bind("<KeyRelease>", self.calculate_defaults)
 
-    # Zeiten ins geforderte UTC-RFC3339 Format ("...Z") umrechnen
-    start_utc_str = start_dt_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    end_utc_str = end_dt_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        # 3. Distanz
+        frame_dist = tk.Frame(root)
+        frame_dist.pack(fill="x", **pad_options)
+        tk.Label(frame_dist, text="Distanz (km):", width=18, anchor="w").pack(side="left")
+        self.entry_distance = tk.Entry(frame_dist, width=12)
+        self.entry_distance.pack(side="right")
+        self.entry_distance.insert(0, "1.6")
+        self.entry_distance.bind("<KeyRelease>", self.calculate_steps_only)
 
-    # Einheiten für Google Health v4 umrechnen (Millimeter & Millimeter/Sekunde)
-    distance_mm = int(round(distance_km * 1_000_000))
-    speed_mm_per_s = round((speed_kmh / 3.6) * 1000, 2)
-    # Grobe Kalorienschätzung (ca. 3.5 kcal pro Minute beim Gehen), da manche Ansichten das Feld erwarten
-    est_calories = int(round(duration_min * 3.8))
+        # 4. Schritte
+        frame_steps = tk.Frame(root)
+        frame_steps.pack(fill="x", **pad_options)
+        tk.Label(frame_steps, text="Schritte:", width=18, anchor="w").pack(side="left")
+        self.entry_steps = tk.Entry(frame_steps, width=12)
+        self.entry_steps.pack(side="right")
+        self.entry_steps.insert(0, "2580")
 
-    headers = {
-        "Authorization": f"Bearer {creds.token}",
-        "Content-Type": "application/json"
-    }
+        # 5. Startzeit (HH:MM)
+        frame_time = tk.Frame(root)
+        frame_time.pack(fill="x", **pad_options)
+        tk.Label(frame_time, text="Startzeit (HH:MM):", width=18, anchor="w").pack(side="left")
+        self.entry_time = tk.Entry(frame_time, width=12)
+        self.entry_time.pack(side="right")
+        # Standard: Jetzt minus eingetragene Dauer
+        default_start = (datetime.now() - timedelta(minutes=30)).strftime("%H:%M")
+        self.entry_time.insert(0, default_start)
 
-    # 1. Exercise-Session Payload (bündelt Dauer, Schritte, Distanz und Geschwindigkeit)
-    exercise_url = f"{API_BASE_URL}/exercise/dataPoints"
-    exercise_payload = {
-        "exercise": {
-            "interval": {
-                "startTime": start_utc_str,
-                "startUtcOffset": offset_str,
-                "endTime": end_utc_str,
-                "endUtcOffset": offset_str
-            },
-            "exerciseType": "WALKING",
-            "displayName": "Skandika Walking Pad",
-            "activeDuration": f"{duration_sec}s",
-            "metricsSummary": {
-                "steps": steps,
-                "distanceMillimeters": distance_mm,
-                "averageSpeedMillimetersPerSecond": speed_mm_per_s,
-                "caloriesKcal": est_calories
+        # Live-Berechnung einmalig anstoßen
+        self.calculate_defaults()
+
+        # Absende-Button
+        self.btn_submit = tk.Button(root, text="An Google Health senden", bg="#10B981", fg="white", 
+                                    font=("Helvetica", 11, "bold"), command=self.submit_data)
+        self.btn_submit.pack(pady=20, ipadx=10, ipady=5)
+
+    def calculate_defaults(self, event=None):
+        """Berechnet Distanz und Schritte automatisch aus Dauer und Tempo"""
+        try:
+            dur = float(self.entry_duration.get().replace(",", "."))
+            spd = float(self.entry_speed.get().replace(",", "."))
+            dist = round(spd * (dur / 60.0), 2)
+            
+            self.entry_distance.delete(0, tk.END)
+            self.entry_distance.insert(0, str(dist))
+            
+            steps = int((dist * 1000) / DEFAULT_STRIDE_M)
+            self.entry_steps.delete(0, tk.END)
+            self.entry_steps.insert(0, str(steps))
+        except ValueError:
+            pass
+
+    def calculate_steps_only(self, event=None):
+        """Passt die Schritte an, falls die Distanz manuell überschrieben wird"""
+        try:
+            dist = float(self.entry_distance.get().replace(",", "."))
+            steps = int((dist * 1000) / DEFAULT_STRIDE_M)
+            self.entry_steps.delete(0, tk.END)
+            self.entry_steps.insert(0, str(steps))
+        except ValueError:
+            pass
+
+    def submit_data(self):
+        try:
+            duration_min = float(self.entry_duration.get().replace(",", "."))
+            speed_kmh = float(self.entry_speed.get().replace(",", "."))
+            distance_km = float(self.entry_distance.get().replace(",", "."))
+            steps = int(self.entry_steps.get().replace(".", "").replace(",", ""))
+            
+            time_str = self.entry_time.get().strip()
+            now_local = datetime.now().astimezone()
+            
+            if time_str:
+                naive_dt = datetime.strptime(f"{now_local.strftime('%Y-%m-%d')} {time_str}", "%Y-%m-%d %H:%M")
+                start_dt_local = naive_dt.replace(tzinfo=now_local.tzinfo)
+            else:
+                start_dt_local = now_local - timedelta(minutes=duration_min)
+
+            duration_sec = int(duration_min * 60)
+            end_dt_local = start_dt_local + timedelta(seconds=duration_sec)
+            
+            utc_offset_sec = int(start_dt_local.astimezone().utcoffset().total_seconds())
+            offset_str = f"{utc_offset_sec}s"
+            
+            start_utc_str = start_dt_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            end_utc_str = end_dt_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+            distance_mm = int(round(distance_km * 1_000_000))
+            speed_mm_per_s = round((speed_kmh / 3.6) * 1000, 2)
+            est_calories = int(round(duration_min * 3.8))
+
+            # Authentifizierung & API-Call
+            creds = get_credentials()
+            headers = {
+                "Authorization": f"Bearer {creds.token}",
+                "Content-Type": "application/json"
             }
-        }
-    }
+            
+            exercise_url = f"{API_BASE_URL}/exercise/dataPoints"
+            exercise_payload = {
+                "exercise": {
+                    "interval": {
+                        "startTime": start_utc_str,
+                        "startUtcOffset": offset_str,
+                        "endTime": end_utc_str,
+                        "endUtcOffset": offset_str
+                    },
+                    "exerciseType": "WALKING",
+                    "displayName": "Skandika Walking Pad",
+                    "activeDuration": f"{duration_sec}s",
+                    "metricsSummary": {
+                        "steps": steps,
+                        "distanceMillimeters": distance_mm,
+                        "averageSpeedMillimetersPerSecond": speed_mm_per_s,
+                        "caloriesKcal": est_calories
+                    }
+                }
+            }
 
-    print("🚀 Sende Training an Google Health API...")
-    res_ex = requests.post(exercise_url, headers=headers, json=exercise_payload)
+            res = requests.post(exercise_url, headers=headers, json=exercise_payload)
+            if res.status_code == 401 and creds.refresh_token:
+                creds.refresh(Request())
+                with open(TOKEN_FILE, "w", encoding="utf-8") as f:
+                    f.write(creds.to_json())
+                headers["Authorization"] = f"Bearer {creds.token}"
+                res = requests.post(exercise_url, headers=headers, json=exercise_payload)
+            
+            if res.ok:
+                messagebox.showinfo("Erfolg 🎉", f"Training erfolgreich übertragen!\n\n• {steps} Schritte\n• {distance_km} km\n• {duration_min} Minuten")
+                self.root.destroy()
+            else:
+                messagebox.showerror("Fehler", f"API-Fehler ({res.status_code}):\n{res.text}")
 
-    if res_ex.ok:
-        print("🎉 Training erfolgreich eingetragen!")
-        print(json.dumps(res_ex.json(), indent=2))
-    else:
-        print(f"❌ Fehler beim Eintragen des Trainings ({res_ex.status_code}):")
-        print(res_ex.text)
-
-
-def prompt_float(prompt_text: str, default: float = None) -> float:
-    val = input(prompt_text).strip().replace(",", ".")
-    if not val and default is not None:
-        return default
-    return float(val) if val else 0.0
-
-
-def main():
-    print("=== 🏃‍♂️ Skandika Walking Pad -> Google Health v4 Logger ===\n")
-    
-    creds = get_credentials()
-    test_connection(creds)
-
-    duration_min = prompt_float("1. Dauer in Minuten (z. B. 45): ")
-    if duration_min <= 0:
-        print("Abbruch.")
-        return
-
-    speed_kmh = prompt_float("2. Geschwindigkeit in km/h (z. B. 3.2): ", 3.0)
-    
-    calc_dist = round(speed_kmh * (duration_min / 60.0), 2)
-    distance_km = prompt_float(f"3. Entfernung in km [Enter für berechnete {calc_dist} km]: ", calc_dist)
-
-    # Wenn Distanz manuell geändert wurde und Speed nicht dazu passt, Speed ggf. nachziehen
-    if distance_km > 0 and speed_kmh == 0:
-        speed_kmh = round(distance_km / (duration_min / 60.0), 2)
-
-    est_steps = int((distance_km * 1000) / DEFAULT_STRIDE_M)
-    steps_in = input(f"4. Schritte [Enter für geschätzte {est_steps} Schritte]: ").strip()
-    steps = int(steps_in) if steps_in else est_steps
-
-    now_local = datetime.now().astimezone()
-    default_start = now_local - timedelta(minutes=duration_min)
-
-    start_str = input(f"5. Startzeit HH:MM [Enter für {default_start.strftime('%H:%M')} Uhr]: ").strip()
-    date_str = input(f"6. Datum YYYY-MM-DD [Enter für heute, {now_local.strftime('%Y-%m-%d')}]: ").strip() or now_local.strftime("%Y-%m-%d")
-
-    if start_str:
-        naive_dt = datetime.strptime(f"{date_str} {start_str}", "%Y-%m-%d %H:%M")
-        start_dt_local = naive_dt.replace(tzinfo=now_local.tzinfo)
-    else:
-        start_dt_local = default_start
-
-    print("\n--- Zusammenfassung ---")
-    print(f"Start     : {start_dt_local.strftime('%Y-%m-%d %H:%M')} Uhr ({duration_min:.0f} Min.)")
-    print(f"Tempo     : {speed_kmh:.2f} km/h")
-    print(f"Distanz   : {distance_km:.2f} km")
-    print(f"Schritte  : {steps}")
-
-    confirm = input("\nJetzt an Google Health senden? (J/n): ").strip().lower()
-    if confirm in ("", "j", "ja", "y", "yes"):
-        log_walking_pad_workout(creds, start_dt_local, duration_min, distance_km, speed_kmh, steps)
+        except Exception as e:
+            messagebox.showerror("Fehler", f"Ungültige Eingabe oder Verbindungsfehler:\n{str(e)}")
 
 
 if __name__ == "__main__":
-    main()
+    root = tk.Tk()
+    app = WalkingPadApp(root)
+    root.mainloop()
