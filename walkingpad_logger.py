@@ -307,11 +307,12 @@ def parse_walkingpad_display(raw_text: str) -> Dict[str, Any]:
                 except ValueError:
                     pass
 
-    # 4. STEP: Vierstellige ganze Zahl
-    step_m = re.search(r"(?:STEP[S]?|STP)[^\d]*(\d{3,5})\b", cleaned, re.IGNORECASE)
+    # 4. STEP: Ganze Zahl (auch 2- oder 3-stellig zu Beginn des Trainings!)
+    step_m = re.search(r"(?:STEP[S]?|STP)[^\d]*(\d{1,6})\b", cleaned, re.IGNORECASE)
     if not step_m:
         if not time_m and result["distance"] is None:
-            pure_step = re.search(r"\b(\d{4})\b", cleaned)
+            # Reine Ganzzahl ohne Punkt oder Doppelpunkt: 2-stellig, 3-stellig oder mehr
+            pure_step = re.search(r"\b(\d{2,6})\b", cleaned)
             if pure_step:
                 result["steps"] = int(pure_step.group(1))
     else:
@@ -500,35 +501,35 @@ class WalkingPadApp:
         ttk.Label(manual_box, text="Dauer (Min:Sek):", font=("Helvetica", 11, "bold")).grid(row=row, column=0, sticky="w", pady=pad_y)
         self.entry_duration = ttk.Entry(manual_box, width=14, font=("Helvetica", 11))
         self.entry_duration.grid(row=row, column=1, sticky="e", pady=pad_y)
-        self.entry_duration.insert(0, "30:00")
+        self.entry_duration.insert(0, "00:00")
         row += 1
 
         # 2. Tempo (SPD)
         ttk.Label(manual_box, text="Tempo (km/h):", font=("Helvetica", 11, "bold")).grid(row=row, column=0, sticky="w", pady=pad_y)
         self.entry_speed = ttk.Entry(manual_box, width=14, font=("Helvetica", 11))
         self.entry_speed.grid(row=row, column=1, sticky="e", pady=pad_y)
-        self.entry_speed.insert(0, "3.2")
+        self.entry_speed.insert(0, "0.0")
         row += 1
 
         # 3. Distanz (DIST)
         ttk.Label(manual_box, text="Distanz (km):", font=("Helvetica", 11, "bold")).grid(row=row, column=0, sticky="w", pady=pad_y)
         self.entry_distance = ttk.Entry(manual_box, width=14, font=("Helvetica", 11))
         self.entry_distance.grid(row=row, column=1, sticky="e", pady=pad_y)
-        self.entry_distance.insert(0, "1.60")
+        self.entry_distance.insert(0, "0.00")
         row += 1
 
         # 4. Schritte (STEP)
         ttk.Label(manual_box, text="Schritte:", font=("Helvetica", 11, "bold")).grid(row=row, column=0, sticky="w", pady=pad_y)
         self.entry_steps = ttk.Entry(manual_box, width=14, font=("Helvetica", 11))
         self.entry_steps.grid(row=row, column=1, sticky="e", pady=pad_y)
-        self.entry_steps.insert(0, "2580")
+        self.entry_steps.insert(0, "0")
         row += 1
 
         # 5. Startzeit
         ttk.Label(manual_box, text="Startzeit (HH:MM):", font=("Helvetica", 10)).grid(row=row, column=0, sticky="w", pady=pad_y)
         self.entry_time = ttk.Entry(manual_box, width=14, font=("Helvetica", 10))
         self.entry_time.grid(row=row, column=1, sticky="e", pady=pad_y)
-        default_start = (datetime.now() - timedelta(minutes=30)).strftime("%H:%M")
+        default_start = datetime.now().strftime("%H:%M")
         self.entry_time.insert(0, default_start)
         row += 1
 
@@ -720,47 +721,74 @@ class WalkingPadApp:
         status_parts = []
 
         # 1. TIME (Dauer in Min:Sek, z. B. 06:13 oder 25:30)
-        if parsed["time_str"] is not None:
-            self.entry_duration.delete(0, tk.END)
-            self.entry_duration.insert(0, parsed["time_str"])
-            self.last_ocr_data["duration_min"] = parsed["duration_min"]
-            self.last_ocr_data["time_str"] = parsed["time_str"]
-            status_parts.append(f"Zeit: {parsed['time_str']}")
+        # Dauer steigt während des Trainings nur an
+        dur_val = parsed["duration_min"]
+        time_display = parsed["time_str"]
+        if dur_val is not None:
+            if not time_display:
+                mm = int(dur_val)
+                ss = int(round((dur_val - mm) * 60))
+                time_display = f"{mm:02d}:{ss:02d}"
 
-            dur_m = parsed["duration_min"] or 0.0
-            st = (datetime.now() - timedelta(minutes=dur_m)).strftime("%H:%M")
-            self.entry_time.delete(0, tk.END)
-            self.entry_time.insert(0, st)
-        elif parsed["duration_min"] is not None:
-            mm = int(parsed["duration_min"])
-            ss = int(round((parsed["duration_min"] - mm) * 60))
-            time_str = f"{mm:02d}:{ss:02d}"
-            self.entry_duration.delete(0, tk.END)
-            self.entry_duration.insert(0, time_str)
-            self.last_ocr_data["duration_min"] = parsed["duration_min"]
-            self.last_ocr_data["time_str"] = time_str
-            status_parts.append(f"Zeit: {time_str}")
+            try:
+                curr_str = self.entry_duration.get().strip()
+                if ":" in curr_str:
+                    c_parts = curr_str.split(":")
+                    curr_dur = int(c_parts[0]) + int(c_parts[1]) / 60.0
+                else:
+                    curr_dur = float(curr_str.replace(",", "."))
+            except ValueError:
+                curr_dur = 0.0
 
-        # 2. SPD
+            # Nur nach oben hin korrigieren (oder wenn Feld noch auf 0 steht)
+            if dur_val >= curr_dur or curr_dur == 0.0:
+                self.entry_duration.delete(0, tk.END)
+                self.entry_duration.insert(0, time_display)
+                self.last_ocr_data["duration_min"] = dur_val
+                self.last_ocr_data["time_str"] = time_display
+                status_parts.append(f"Zeit: {time_display}")
+
+                st = (datetime.now() - timedelta(minutes=dur_val)).strftime("%H:%M")
+                self.entry_time.delete(0, tk.END)
+                self.entry_time.insert(0, st)
+
+        # 2. SPD (Tempo live aktualisieren)
         if parsed["speed"] is not None:
             self.entry_speed.delete(0, tk.END)
             self.entry_speed.insert(0, f"{parsed['speed']:.1f}")
             self.last_ocr_data["speed"] = parsed["speed"]
             status_parts.append(f"Tempo: {parsed['speed']:.1f} km/h")
 
-        # 3. DIST
+        # 3. DIST (Distanz steigt während des Trainings nur an)
         if parsed["distance"] is not None:
-            self.entry_distance.delete(0, tk.END)
-            self.entry_distance.insert(0, f"{parsed['distance']:.2f}")
-            self.last_ocr_data["distance"] = parsed["distance"]
-            status_parts.append(f"Distanz: {parsed['distance']:.2f} km")
+            new_dist = parsed["distance"]
+            try:
+                curr_dist = float(self.entry_distance.get().strip().replace(",", "."))
+            except ValueError:
+                curr_dist = 0.0
 
-        # 4. STEP
+            # Nur nach oben hin korrigieren (oder wenn noch 0)
+            if new_dist >= curr_dist or curr_dist == 0.0:
+                self.entry_distance.delete(0, tk.END)
+                self.entry_distance.insert(0, f"{new_dist:.2f}")
+                self.last_ocr_data["distance"] = new_dist
+                status_parts.append(f"Distanz: {new_dist:.2f} km")
+
+        # 4. STEP (Schritte steigen während des Trainings nur an - auch 2- und 3-stellig!)
         if parsed["steps"] is not None:
-            self.entry_steps.delete(0, tk.END)
-            self.entry_steps.insert(0, str(parsed["steps"]))
-            self.last_ocr_data["steps"] = parsed["steps"]
-            status_parts.append(f"Schritte: {parsed['steps']}")
+            new_steps = parsed["steps"]
+            try:
+                curr_steps = int(self.entry_steps.get().strip().replace(".", "").replace(",", ""))
+            except ValueError:
+                curr_steps = 0
+
+            # Schritte werden nur nach oben hin korrigiert
+            # Verhindert, dass kurzzeitige OCR-Fehler den Zähler nach unten verfälschen
+            if new_steps >= curr_steps or curr_steps == 0:
+                self.entry_steps.delete(0, tk.END)
+                self.entry_steps.insert(0, str(new_steps))
+                self.last_ocr_data["steps"] = new_steps
+                status_parts.append(f"Schritte: {new_steps}")
 
         if status_parts:
             self.lbl_ocr_status.config(
