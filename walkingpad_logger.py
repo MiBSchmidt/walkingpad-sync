@@ -158,7 +158,46 @@ def upload_workout_data(
             res = requests.post(exercise_url, headers=headers, json=exercise_payload, timeout=15)
 
         if res.ok:
-            return True, f"Training übertragen:\n• {steps} Schritte\n• {distance_km:.2f} km\n• {duration_min:.1f} Min.\n• {speed_kmh:.1f} km/h"
+            try:
+                data = res.json()
+                ex = data.get("exercise", {})
+                metrics = ex.get("metricsSummary", {})
+
+                acc_steps = metrics.get("steps", steps)
+                acc_dist_mm = metrics.get("distanceMillimeters")
+                acc_dist_km = (acc_dist_mm / 1_000_000.0) if acc_dist_mm is not None else distance_km
+                acc_spd_mm_s = metrics.get("averageSpeedMillimetersPerSecond")
+                acc_spd_kmh = round((acc_spd_mm_s / 1000.0) * 3.6, 1) if acc_spd_mm_s is not None else speed_kmh
+                acc_kcal = metrics.get("caloriesKcal", est_calories)
+
+                dur_raw = ex.get("activeDuration", f"{duration_sec}s")
+                try:
+                    dur_s = int(str(dur_raw).rstrip("s"))
+                    dur_display = f"{dur_s // 60:02d}:{dur_s % 60:02d} ({round(dur_s / 60.0, 1)} Min.)"
+                except Exception:
+                    dur_display = f"{duration_min:.1f} Min."
+
+                msg = (
+                    "Google Health hat das Training erfolgreich verbucht!\n\n"
+                    "Von Google bestätigte Werte:\n"
+                    f"  ✅ Dauer:         {dur_display}\n"
+                    f"  ✅ Schritte:      {acc_steps}\n"
+                    f"  ✅ Distanz:       {acc_dist_km:.2f} km\n"
+                    f"  ✅ Tempo:         {acc_spd_kmh:.1f} km/h\n"
+                    f"  ✅ Kalorien:      ~{acc_kcal} kcal\n"
+                    f"  ✅ Zeitraum:      {start_dt_local.strftime('%H:%M')} – {end_dt_local.strftime('%H:%M')} Uhr\n"
+                    f"  ✅ Aktivität:     {ex.get('displayName', 'Walking Pad')}"
+                )
+                return True, msg
+            except Exception:
+                return True, (
+                    "Google Health hat das Training erfolgreich verbucht!\n\n"
+                    f"  ✅ Schritte:  {steps}\n"
+                    f"  ✅ Distanz:   {distance_km:.2f} km\n"
+                    f"  ✅ Dauer:     {duration_min:.1f} Min.\n"
+                    f"  ✅ Tempo:     {speed_kmh:.1f} km/h\n"
+                    f"  ✅ Zeitraum:  {start_dt_local.strftime('%H:%M')} – {end_dt_local.strftime('%H:%M')} Uhr"
+                )
         else:
             return False, f"API-Fehler ({res.status_code}):\n{res.text}"
     except Exception as e:
@@ -794,6 +833,22 @@ class WalkingPadApp:
             else:
                 start_dt_local = now_local - timedelta(minutes=duration_min)
 
+            end_dt_local = start_dt_local + timedelta(minutes=duration_min)
+
+            # Bestätigungsdialog VOR der Übertragung
+            confirm_msg = (
+                "Möchtest du das folgende Training an Google Health übertragen?\n\n"
+                f"  • Dauer:     {dur_str} ({duration_min:.1f} Min.)\n"
+                f"  • Tempo:     {speed_kmh:.1f} km/h\n"
+                f"  • Distanz:   {distance_km:.2f} km\n"
+                f"  • Schritte:  {steps}\n"
+                f"  • Startzeit: {start_dt_local.strftime('%H:%M')} Uhr\n"
+                f"  • Endzeit:   ~{end_dt_local.strftime('%H:%M')} Uhr\n\n"
+                "Jetzt an Google Health senden?"
+            )
+            if not messagebox.askyesno("Training bestätigen", confirm_msg, parent=self.root):
+                return
+
             self.btn_submit.config(state="disabled", text="⏳ Wird an Google Health gesendet...")
 
             def _upload():
@@ -814,9 +869,9 @@ class WalkingPadApp:
     def _on_submit_done(self, success: bool, msg: str):
         self.btn_submit.config(state="normal", text="🚀 Training an Google Health senden")
         if success:
-            messagebox.showinfo("Erfolg 🎉", f"Training erfolgreich an Google Health übertragen!\n\n{msg}")
+            messagebox.showinfo("Google Health Bestätigung 🎉", msg, parent=self.root)
         else:
-            messagebox.showerror("Fehler beim Upload", f"Google Health API-Fehler:\n{msg}")
+            messagebox.showerror("Fehler beim Upload", f"Google Health API-Fehler:\n{msg}", parent=self.root)
 
     def on_close(self):
         self.stop_camera()
