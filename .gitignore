@@ -224,5 +224,7 @@ token.json
 *.jpg
 *.png
 *.jpeg
+!assets/*.jpg
+!assets/*.png
 *.app
 error.log

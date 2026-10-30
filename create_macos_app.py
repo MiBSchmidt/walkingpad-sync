@@ -23,69 +23,44 @@ SYS_APPS_DIR = Path("/Applications")
 
 
 def create_app_icon(output_icns: Path):
-    """Erstellt ein modernes macOS-App-Icon im Squircle-Design mit iconutil."""
+    """Erstellt ein modernes macOS-App-Icon aus assets/app_icon.jpg mit iconutil."""
     iconset_dir = REPO_DIR / "AppIcon.iconset"
     if iconset_dir.exists():
         shutil.rmtree(iconset_dir)
     iconset_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1024x1024 Master Icon
-    size = 1024
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
+    src_img_path = REPO_DIR / "assets" / "app_icon.jpg"
+    if src_img_path.exists():
+        img = Image.open(src_img_path).convert("RGBA")
+        # Quadratisch zuschneiden
+        w, h = img.size
+        min_dim = min(w, h)
+        left = (w - min_dim) // 2
+        top = (h - min_dim) // 2
+        img = img.crop((left, top, left + min_dim, top + min_dim))
 
-    # Squircle Hintergrund (macOS Style mit abgerundeten Ecken)
-    margin = 80
-    bg_color_top = (17, 24, 39)     # #111827 Dark Slate
-    accent_green = (16, 185, 129)   # #10B981 Emerald
-    cyan_glow = (59, 130, 246)      # #3B82F6 Blue
+        size = 1024
+        img = img.resize((size, size), Image.Resampling.LANCZOS)
 
-    # Dunkler abgerundeter Kasten
-    draw.rounded_rectangle(
-        [margin, margin, size - margin, size - margin],
-        radius=200,
-        fill=bg_color_top,
-        outline=(55, 65, 81),
-        width=12
-    )
+        # macOS Squircle-Maske (moderne abgerundete Ecken)
+        mask = Image.new("L", (size, size), 0)
+        mask_draw = ImageDraw.Draw(mask)
+        margin = 40
+        mask_draw.rounded_rectangle([margin, margin, size - margin, size - margin], radius=190, fill=255)
 
-    # Laufband-Bodenplatte (Perspektive)
-    draw.polygon([
-        (260, 720), (764, 720), (840, 790), (184, 790)
-    ], fill=(31, 41, 55))
+        final_icon = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        final_icon.paste(img, (0, 0), mask=mask)
 
-    # Laufband-Band mit Speed-Streifen
-    draw.polygon([
-        (280, 730), (744, 730), (810, 780), (214, 780)
-    ], fill=accent_green)
-
-    # Weiß leuchtendes Display (wie auf dem Walking Pad)
-    draw.rounded_rectangle(
-        [312, 280, 712, 440],
-        radius=30,
-        fill=(0, 0, 0),
-        outline=accent_green,
-        width=8
-    )
-
-    # Display-Text (Digital 7-Segment stilisierte Balken)
-    # 0 6 : 1 3
-    # Zeichnen von "WALKING PAD" und LED-Elementen
-    draw.text((360, 310), "06:13", fill=(255, 255, 255))
-    draw.text((450, 400), "TIME", fill=accent_green)
-
-    # Stilisierter Läufer / Schritt-Symbol (Dynamische Figur)
-    # Kopf
-    draw.ellipse([480, 480, 544, 544], fill=(255, 255, 255))
-    # Körper & Beine in Bewegung
-    draw.line([(512, 544), (512, 640)], fill=(255, 255, 255), width=24)
-    # Schritt nach vorne
-    draw.line([(512, 630), (600, 720)], fill=accent_green, width=22)
-    # Schritt nach hinten
-    draw.line([(512, 630), (430, 710)], fill=(255, 255, 255), width=20)
-    # Arme
-    draw.line([(512, 570), (590, 600)], fill=(255, 255, 255), width=18)
-    draw.line([(512, 570), (440, 610)], fill=accent_green, width=18)
+        # Eleganter Rand
+        border_draw = ImageDraw.Draw(final_icon)
+        border_draw.rounded_rectangle(
+            [margin, margin, size - margin, size - margin],
+            radius=190,
+            outline=(200, 210, 225, 220),
+            width=4
+        )
+    else:
+        final_icon = Image.new("RGBA", (1024, 1024), (16, 185, 129, 255))
 
     # Alle Standardgrößen für macOS iconset erzeugen
     sizes = [
@@ -102,10 +77,9 @@ def create_app_icon(output_icns: Path):
     ]
 
     for s, name in sizes:
-        resized = img.resize((s, s), Image.Resampling.LANCZOS)
+        resized = final_icon.resize((s, s), Image.Resampling.LANCZOS)
         resized.save(iconset_dir / name)
 
-    # iconutil aufrufen
     try:
         subprocess.run(["iconutil", "-c", "icns", str(iconset_dir), "-o", str(output_icns)], check=True)
     finally:

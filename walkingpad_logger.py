@@ -460,6 +460,80 @@ class ValueStabilizer:
 
 
 # ---------------------------------------------------------------------------
+# Moderner, kontrastreicher Button für macOS (vermeidet hellgraues Auswaschen)
+# ---------------------------------------------------------------------------
+class ModernButton(tk.Frame):
+    """
+    Garantiert satten, leuchtenden Hintergrund mit scharfer weißer Schrift auf macOS.
+    (Standard-tk.Button erzwingt auf macOS Aqua ein hellgraues Bezel, was weiße Schrift unlesbar macht).
+    """
+    def __init__(
+        self,
+        parent,
+        text: str,
+        command,
+        bg: str = "#059669",
+        fg: str = "#FFFFFF",
+        hover_bg: str = "#047857",
+        font=("Helvetica", 12, "bold"),
+        **kwargs
+    ):
+        super().__init__(parent, bg=bg, cursor="hand2", **kwargs)
+        self.command = command
+        self.bg = bg
+        self.hover_bg = hover_bg
+        self.fg = fg
+        self.enabled = True
+
+        self.lbl = tk.Label(
+            self,
+            text=text,
+            bg=bg,
+            fg=fg,
+            font=font,
+            cursor="hand2",
+            padx=14,
+            pady=10
+        )
+        self.lbl.pack(fill="both", expand=True)
+
+        for w in (self, self.lbl):
+            w.bind("<Button-1>", self._on_click)
+            w.bind("<Enter>", self._on_enter)
+            w.bind("<Leave>", self._on_leave)
+
+    def _on_click(self, event=None):
+        if self.enabled and self.command:
+            self.command()
+
+    def _on_enter(self, event=None):
+        if self.enabled:
+            self.configure(bg=self.hover_bg)
+            self.lbl.configure(bg=self.hover_bg)
+
+    def _on_leave(self, event=None):
+        if self.enabled:
+            self.configure(bg=self.bg)
+            self.lbl.configure(bg=self.bg)
+
+    def config(self, **kwargs):
+        state = kwargs.get("state")
+        text = kwargs.get("text")
+
+        if state == "disabled":
+            self.enabled = False
+            self.configure(bg="#9CA3AF", cursor="arrow")
+            self.lbl.configure(bg="#9CA3AF", fg="#F3F4F6", cursor="arrow")
+        elif state == "normal":
+            self.enabled = True
+            self.configure(bg=self.bg, cursor="hand2")
+            self.lbl.configure(bg=self.bg, fg=self.fg, cursor="hand2")
+
+        if text is not None:
+            self.lbl.configure(text=text)
+
+
+# ---------------------------------------------------------------------------
 # Hauptanwendung mit Tkinter GUI
 # ---------------------------------------------------------------------------
 class WalkingPadApp:
@@ -677,21 +751,17 @@ class WalkingPadApp:
         btn_clear.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(10, 4))
         row += 1
 
-        # Großer Senden-Button
-        self.btn_submit = tk.Button(
+        # Großer Senden-Button (sattes Smaragdgrün mit strahlend weißer Schrift, perfekt lesbar auf macOS)
+        self.btn_submit = ModernButton(
             manual_box,
             text="🚀 Training an Google Health senden",
-            bg="#10B981",
-            fg="white",
-            activebackground="#059669",
-            activeforeground="white",
-            font=("Helvetica", 12, "bold"),
-            relief="raised",
-            bd=3,
-            cursor="hand2",
-            command=self.submit_data
+            command=self.submit_data,
+            bg="#059669",
+            hover_bg="#047857",
+            fg="#FFFFFF",
+            font=("Helvetica", 12, "bold")
         )
-        self.btn_submit.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(15, 5), ipady=8)
+        self.btn_submit.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(15, 5))
 
     def on_camera_combo_change(self, event=None):
         val = self.combo_cam.get()
