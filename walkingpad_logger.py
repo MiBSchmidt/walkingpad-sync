@@ -721,7 +721,6 @@ class WalkingPadApp:
         status_parts = []
 
         # 1. TIME (Dauer in Min:Sek, z. B. 06:13 oder 25:30)
-        # Dauer steigt während des Trainings nur an
         dur_val = parsed["duration_min"]
         time_display = parsed["time_str"]
         if dur_val is not None:
@@ -730,27 +729,15 @@ class WalkingPadApp:
                 ss = int(round((dur_val - mm) * 60))
                 time_display = f"{mm:02d}:{ss:02d}"
 
-            try:
-                curr_str = self.entry_duration.get().strip()
-                if ":" in curr_str:
-                    c_parts = curr_str.split(":")
-                    curr_dur = int(c_parts[0]) + int(c_parts[1]) / 60.0
-                else:
-                    curr_dur = float(curr_str.replace(",", "."))
-            except ValueError:
-                curr_dur = 0.0
+            self.entry_duration.delete(0, tk.END)
+            self.entry_duration.insert(0, time_display)
+            self.last_ocr_data["duration_min"] = dur_val
+            self.last_ocr_data["time_str"] = time_display
+            status_parts.append(f"Zeit: {time_display}")
 
-            # Nur nach oben hin korrigieren (oder wenn Feld noch auf 0 steht)
-            if dur_val >= curr_dur or curr_dur == 0.0:
-                self.entry_duration.delete(0, tk.END)
-                self.entry_duration.insert(0, time_display)
-                self.last_ocr_data["duration_min"] = dur_val
-                self.last_ocr_data["time_str"] = time_display
-                status_parts.append(f"Zeit: {time_display}")
-
-                st = (datetime.now() - timedelta(minutes=dur_val)).strftime("%H:%M")
-                self.entry_time.delete(0, tk.END)
-                self.entry_time.insert(0, st)
+            st = (datetime.now() - timedelta(minutes=dur_val)).strftime("%H:%M")
+            self.entry_time.delete(0, tk.END)
+            self.entry_time.insert(0, st)
 
         # 2. SPD (Tempo live aktualisieren)
         if parsed["speed"] is not None:
@@ -759,36 +746,21 @@ class WalkingPadApp:
             self.last_ocr_data["speed"] = parsed["speed"]
             status_parts.append(f"Tempo: {parsed['speed']:.1f} km/h")
 
-        # 3. DIST (Distanz steigt während des Trainings nur an)
+        # 3. DIST (Distanz live aktualisieren)
         if parsed["distance"] is not None:
             new_dist = parsed["distance"]
-            try:
-                curr_dist = float(self.entry_distance.get().strip().replace(",", "."))
-            except ValueError:
-                curr_dist = 0.0
+            self.entry_distance.delete(0, tk.END)
+            self.entry_distance.insert(0, f"{new_dist:.2f}")
+            self.last_ocr_data["distance"] = new_dist
+            status_parts.append(f"Distanz: {new_dist:.2f} km")
 
-            # Nur nach oben hin korrigieren (oder wenn noch 0)
-            if new_dist >= curr_dist or curr_dist == 0.0:
-                self.entry_distance.delete(0, tk.END)
-                self.entry_distance.insert(0, f"{new_dist:.2f}")
-                self.last_ocr_data["distance"] = new_dist
-                status_parts.append(f"Distanz: {new_dist:.2f} km")
-
-        # 4. STEP (Schritte steigen während des Trainings nur an - auch 2- und 3-stellig!)
+        # 4. STEP (Schritte live aktualisieren - auch 2- und 3-stellig)
         if parsed["steps"] is not None:
             new_steps = parsed["steps"]
-            try:
-                curr_steps = int(self.entry_steps.get().strip().replace(".", "").replace(",", ""))
-            except ValueError:
-                curr_steps = 0
-
-            # Schritte werden nur nach oben hin korrigiert
-            # Verhindert, dass kurzzeitige OCR-Fehler den Zähler nach unten verfälschen
-            if new_steps >= curr_steps or curr_steps == 0:
-                self.entry_steps.delete(0, tk.END)
-                self.entry_steps.insert(0, str(new_steps))
-                self.last_ocr_data["steps"] = new_steps
-                status_parts.append(f"Schritte: {new_steps}")
+            self.entry_steps.delete(0, tk.END)
+            self.entry_steps.insert(0, str(new_steps))
+            self.last_ocr_data["steps"] = new_steps
+            status_parts.append(f"Schritte: {new_steps}")
 
         if status_parts:
             self.lbl_ocr_status.config(
