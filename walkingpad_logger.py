@@ -320,7 +320,8 @@ def parse_walkingpad_display(raw_text: str) -> Dict[str, Any]:
             pass
 
     # 3. SPD: mit Punkt/Komma ODER mit "SPD" davor
-    spd_m = re.search(r"(?:SPD|SPEED)[^\d]*(\d+)[.,](\d{1})\b", cleaned, re.IGNORECASE)
+    # (auch STP/SPT fängt typische 7-Segment-Fehler für SPD ab, da 'd' oft als 't' gelesen wird)
+    spd_m = re.search(r"(?:SPD|SPEED|STP|SPT)[^\d]*(\d+)[.,](\d{1})\b", cleaned, re.IGNORECASE)
     if not spd_m:
         spd_no_dot = re.search(r"(?:SPD|SPEED)[^\d]*(\d{1,2})(\d{1})\b", cleaned, re.IGNORECASE)
         if spd_no_dot:
@@ -347,13 +348,15 @@ def parse_walkingpad_display(raw_text: str) -> Dict[str, Any]:
                 except ValueError:
                     pass
 
-    # 4. STEP: Ganze Zahl (auch 2- oder 3-stellig zu Beginn des Trainings!)
-    step_m = re.search(r"(?:STEP[S]?|STP)[^\d]*(\d{1,6})\b", cleaned, re.IGNORECASE)
+    # 4. STEP: Ganze Zahl ohne Dezimalpunkt (mindestens 2-stellig, z. B. 25, 120, 764, 2580)
+    # Wichtig: Niemals 1-stellige Ziffern (wie 3 oder 5) matchen!
+    # Niemals matchen, wenn danach ein Dezimalpunkt folgt (wäre sonst Speed wie 3.0 oder 5.0)!
+    step_m = re.search(r"(?:STEP[S]?|STP)[^\d]*(\d{2,6})(?!\.\d)\b", cleaned, re.IGNORECASE)
     if not step_m:
-        if not time_m and result["distance"] is None:
-            # Reine Ganzzahl ohne Punkt oder Doppelpunkt: 2-stellig, 3-stellig oder mehr
+        if not time_m and result["distance"] is None and result["speed"] is None:
+            # Reine Ganzzahl ohne Punkt oder Doppelpunkt: mindestens 2-stellig
             pure_step = re.search(r"\b(\d{2,6})\b", cleaned)
-            if pure_step:
+            if pure_step and not re.search(r"\b" + pure_step.group(1) + r"\.\d", cleaned):
                 result["steps"] = int(pure_step.group(1))
     else:
         try:
@@ -385,22 +388,25 @@ class ValueStabilizer:
         self.candidates.clear()
 
     def filter_steps(self, new_val: Optional[int], current_gui_val: int) -> Optional[int]:
-        if new_val is None:
+        # Schritte auf einem Laufband sind niemals 1-stellig (immer mindestens 10)
+        if new_val is None or new_val < 10:
             return None
 
-        # Plausibilitätscheck: Wenn bereits ein Wert im Feld steht
-        if current_gui_val > 0:
-            diff = new_val - current_gui_val
-            # Typischer Umschalt-Artefakt (z. B. 360 -> 3603) oder starker Minus-Sprung
-            if diff > 100 or diff < -100:
-                return None
-
-        # 2-Frame Bestätigung (Debounce)
+        # 2-Frame Bestätigung (Debounce):
+        # Das echte Display zeigt den Wert für 2-3 Sekunden (ca. 6-8 Frames).
+        # Ein Umschalt-Artefakt (wie 3603) existiert nur für genau 1 Frame (~100ms) und wird nie bestätigt.
         cand = self.candidates.get("steps")
         if cand and abs(cand["val"] - new_val) <= 5:
             cand["count"] += 1
             cand["val"] = new_val
+            # 2 aufeinanderfolgende Messungen bestätigen den echten Wert
             if cand["count"] >= 2:
+                # Plausibilität: Wenn schon ein Wert > 50 im Feld steht und ein Sprung riesig ist (> 1000)
+                # dann verlange eine 3. Bestätigung zur Sicherheit
+                if current_gui_val > 50:
+                    diff = new_val - current_gui_val
+                    if diff > 1000 and cand["count"] < 3:
+                        return None
                 return new_val
         else:
             self.candidates["steps"] = {"val": new_val, "count": 1}
