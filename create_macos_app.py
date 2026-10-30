@@ -158,22 +158,63 @@ def build_app():
     with open(contents / "Info.plist", "w", encoding="utf-8") as f:
         f.write(info_plist_content)
 
-    # 2. Launcher Binary (Shell Executable ohne Terminal)
+    # 2. Nativer Mach-O Launcher (Objective-C mit AVFoundation Kamera-Autorisierung)
     launcher_path = macos_dir / "WalkingPad Sync"
-    launcher_script = f"""#!/usr/bin/env bash
-# WalkingPad Sync Native App Launcher
+    launcher_src = f"""#import <AVFoundation/AVFoundation.h>
+#import <Foundation/Foundation.h>
+#include <unistd.h>
+#include <stdlib.h>
+#include <stdio.h>
 
-REPO_DIR="{REPO_DIR}"
-cd "$REPO_DIR" || exit 1
+int main(int argc, char *argv[]) {{
+    @autoreleasepool {{
+        // Fordert die native macOS Kamera-Berechtigung für diese App an
+        AVAuthorizationStatus status = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeVideo];
+        if (status == AVAuthorizationStatusNotDetermined) {{
+            dispatch_semaphore_t sema = dispatch_semaphore_create(0);
+            [AVCaptureDevice requestAccessForMediaType:AVMediaTypeVideo completionHandler:^(BOOL granted) {{
+                dispatch_semaphore_signal(sema);
+            }}];
+            dispatch_semaphore_wait(sema, dispatch_time(DISPATCH_TIME_NOW, 60 * NSEC_PER_SEC));
+        }}
+    }}
 
-export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:$PATH"
-export OPENCV_AVFOUNDATION_SKIP_AUTH="0"
+    setenv("PATH", "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin", 1);
+    setenv("OPENCV_AVFOUNDATION_SKIP_AUTH", "0", 1);
 
-# Startet Python direkt im Hintergrund ohne Terminal-Fenster
-exec "$REPO_DIR/venv/bin/python3" "$REPO_DIR/walkingpad_logger.py"
+    const char *repo_dir = "{REPO_DIR}";
+    chdir(repo_dir);
+
+    char *python_path = "{REPO_DIR}/venv/bin/python3";
+    char *script_path = "{REPO_DIR}/walkingpad_logger.py";
+
+    char *args[] = {{
+        python_path,
+        script_path,
+        NULL
+    }};
+
+    execv(args[0], args);
+    perror("execv failed");
+    return 1;
+}}
 """
-    with open(launcher_path, "w", encoding="utf-8") as f:
-        f.write(launcher_script)
+    tmp_m = REPO_DIR / "temp_launcher.m"
+    with open(tmp_m, "w", encoding="utf-8") as f:
+        f.write(launcher_src)
+
+    print("Kompiliere nativen Mach-O Launcher mit AVFoundation...")
+    try:
+        subprocess.run([
+            "clang", "-fobjc-arc",
+            "-framework", "Foundation",
+            "-framework", "AVFoundation",
+            "-o", str(launcher_path),
+            str(tmp_m)
+        ], check=True)
+    finally:
+        if tmp_m.exists():
+            tmp_m.unlink()
 
     os.chmod(launcher_path, 0o755)
 
@@ -181,6 +222,15 @@ exec "$REPO_DIR/venv/bin/python3" "$REPO_DIR/walkingpad_logger.py"
     icns_path = res_dir / "AppIcon.icns"
     print("Erstelle App-Icon...")
     create_app_icon(icns_path)
+
+    # 4. Ad-hoc Codesign (Erforderlich für macOS TCC Kamera-Berechtigung)
+    print("Entferne erweiterte Finder-Attribute...")
+    subprocess.run(["xattr", "-cr", str(LOCAL_APP_PATH)], check=False)
+
+    print("Signiere App-Bundle (ad-hoc codesign für Kamera-TCC)...")
+    subprocess.run([
+        "codesign", "--force", "--deep", "--sign", "-", str(LOCAL_APP_PATH)
+    ], check=True)
 
     print(f"✅ {APP_NAME} erfolgreich erstellt!")
 
@@ -205,3 +255,4 @@ exec "$REPO_DIR/venv/bin/python3" "$REPO_DIR/walkingpad_logger.py"
 
 if __name__ == "__main__":
     build_app()
+

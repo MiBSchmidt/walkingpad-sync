@@ -14,6 +14,7 @@ import json
 import time
 import shutil
 import threading
+import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Tuple, Dict, Any
@@ -581,9 +582,10 @@ class WalkingPadApp:
         ctrl_bar.pack(fill="x", pady=4)
 
         ttk.Button(ctrl_bar, text="🎯 Bereich zentrieren", command=self.reset_roi).pack(side="left")
+        ttk.Button(ctrl_bar, text="⚙️ Kamera-Freigabe", command=self.open_camera_settings).pack(side="right")
         ttk.Label(
             ctrl_bar,
-            text="📌 Fester Rahmen (mit Maus verschiebbar, springt nicht)",
+            text="📌 Fester Rahmen (mit Maus verschiebbar)",
             foreground="#059669",
             font=("Helvetica", 9, "bold")
         ).pack(side="left", padx=8)
@@ -703,6 +705,12 @@ class WalkingPadApp:
         except Exception as e:
             print("Fehler beim Wechsel der Kamera:", e)
 
+    def open_camera_settings(self):
+        try:
+            subprocess.run(["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera"])
+        except Exception:
+            pass
+
     def start_camera(self):
         if self.cap:
             try:
@@ -710,14 +718,33 @@ class WalkingPadApp:
             except Exception:
                 pass
             self.cap = None
-            time.sleep(0.2)
+            time.sleep(0.15)
 
         try:
             self.cap = cv2.VideoCapture(self.camera_index)
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-            time.sleep(0.2)
-            self.camera_running = True
+            time.sleep(0.15)
+
+            if self.cap.isOpened():
+                ret, test_frame = self.cap.read()
+                if ret and test_frame is not None:
+                    self.camera_running = True
+                    return
+
+            # Falls nicht geöffnet werden konnte oder blockiert ist:
+            self.camera_running = False
+            self.lbl_video.configure(
+                image="",
+                text="⚠️ Kamera nicht autorisiert oder nicht verbunden!\n\n"
+                     "1. Öffne Systemeinstellungen -> Datenschutz & Sicherheit -> Kamera\n"
+                     "2. Erlaube dort 'WalkingPad Sync' bzw. 'Python'.\n\n"
+                     "(Klicke unten auf '⚙️ Kamera-Freigabe')",
+                fg="#F87171",
+                font=("Helvetica", 10, "bold"),
+                wraplength=380,
+                justify="center"
+            )
         except Exception as e:
             print("Fehler beim Starten der Kamera:", e)
 
@@ -775,9 +802,16 @@ class WalkingPadApp:
     # Video Frame & OCR
     # -----------------------------------------------------------------------
     def update_camera_frame(self):
-        if self.camera_running and self.cap and self.cap.isOpened():
-            ret, frame = self.cap.read()
-            if ret and frame is not None:
+        if not self.camera_running or not self.cap or not self.cap.isOpened():
+            self.retry_counter = getattr(self, "retry_counter", 0) + 1
+            if self.retry_counter >= 75:  # Alle 2.2 Sekunden erneut versuchen
+                self.retry_counter = 0
+                self.start_camera()
+            self.root.after(30, self.update_camera_frame)
+            return
+
+        ret, frame = self.cap.read()
+        if ret and frame is not None:
                 # 180 Grad drehen
                 frame = cv2.rotate(frame, cv2.ROTATE_180)
                 self.current_frame = frame.copy()
