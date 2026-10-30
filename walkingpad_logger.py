@@ -364,6 +364,101 @@ def parse_walkingpad_display(raw_text: str) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Entprellung & Plausibilitätsfilter (Schutz vor Umschalt-Geisterziffern)
+# ---------------------------------------------------------------------------
+class ValueStabilizer:
+    """
+    Verhindert Umschalt-Geisterziffern und Lesefehler (z. B. 360 -> 3603)
+    durch 2-stufige Filterung:
+    1. Debounce (Konsistenz): Ein Wert wird erst übernommen, wenn er mindestens
+       2-mal hintereinander (oder innerhalb minimaler Toleranz) erkannt wurde.
+       Kurze Umschalt-Artefakte (dauern nur ~100ms) werden so zu 100% verworfen.
+    2. Plausibilitäts-Check: Sprünge bei Schritten von mehr als 100 Schritten
+       auf einen Schlag werden blockiert, da man beim Gehen nicht in wenigen
+       Sekunden hunderte oder tausende Schritte machen kann.
+    """
+    def __init__(self):
+        self.candidates: Dict[str, Dict[str, Any]] = {}
+
+    def reset(self):
+        self.candidates.clear()
+
+    def filter_steps(self, new_val: Optional[int], current_gui_val: int) -> Optional[int]:
+        if new_val is None:
+            return None
+
+        # Plausibilitätscheck: Wenn bereits ein Wert im Feld steht
+        if current_gui_val > 0:
+            diff = new_val - current_gui_val
+            # Typischer Umschalt-Artefakt (z. B. 360 -> 3603) oder starker Minus-Sprung
+            if diff > 100 or diff < -100:
+                return None
+
+        # 2-Frame Bestätigung (Debounce)
+        cand = self.candidates.get("steps")
+        if cand and abs(cand["val"] - new_val) <= 5:
+            cand["count"] += 1
+            cand["val"] = new_val
+            if cand["count"] >= 2:
+                return new_val
+        else:
+            self.candidates["steps"] = {"val": new_val, "count": 1}
+            return None
+
+    def filter_distance(self, new_val: Optional[float], current_gui_val: float) -> Optional[float]:
+        if new_val is None:
+            return None
+
+        if current_gui_val > 0.0:
+            diff = new_val - current_gui_val
+            if diff > 0.15 or diff < -0.15:
+                return None
+
+        cand = self.candidates.get("dist")
+        if cand and abs(cand["val"] - new_val) <= 0.02:
+            cand["count"] += 1
+            cand["val"] = new_val
+            if cand["count"] >= 2:
+                return new_val
+        else:
+            self.candidates["dist"] = {"val": new_val, "count": 1}
+            return None
+
+    def filter_speed(self, new_val: Optional[float]) -> Optional[float]:
+        if new_val is None or new_val > 12.0:
+            return None
+
+        cand = self.candidates.get("speed")
+        if cand and abs(cand["val"] - new_val) <= 0.2:
+            cand["count"] += 1
+            cand["val"] = new_val
+            if cand["count"] >= 2:
+                return new_val
+        else:
+            self.candidates["speed"] = {"val": new_val, "count": 1}
+            return None
+
+    def filter_duration(self, new_val: Optional[float], current_gui_val: float) -> Optional[float]:
+        if new_val is None:
+            return None
+
+        if current_gui_val > 0.0:
+            diff = new_val - current_gui_val
+            if diff > 0.5 or diff < -0.5:
+                return None
+
+        cand = self.candidates.get("duration")
+        if cand and abs(cand["val"] - new_val) <= 0.1:
+            cand["count"] += 1
+            cand["val"] = new_val
+            if cand["count"] >= 2:
+                return new_val
+        else:
+            self.candidates["duration"] = {"val": new_val, "count": 1}
+            return None
+
+
+# ---------------------------------------------------------------------------
 # Hauptanwendung mit Tkinter GUI
 # ---------------------------------------------------------------------------
 class WalkingPadApp:
@@ -372,6 +467,9 @@ class WalkingPadApp:
         self.root.title("Skandika Walking Pad Sync & OCR")
         self.root.geometry("920x640")
         self.root.minsize(860, 580)
+
+        # Entprell- und Plausibilitäts-Filter
+        self.stabilizer = ValueStabilizer()
 
         # Standard-Kamera: Kamera 0
         self.camera_index = 0
@@ -633,6 +731,7 @@ class WalkingPadApp:
             self.cap = None
 
     def clear_fields(self):
+        self.stabilizer.reset()
         self.entry_duration.delete(0, tk.END)
         self.entry_duration.insert(0, "00:00")
         self.entry_speed.delete(0, tk.END)
@@ -763,43 +862,69 @@ class WalkingPadApp:
         dur_val = parsed["duration_min"]
         time_display = parsed["time_str"]
         if dur_val is not None:
-            if not time_display:
-                mm = int(dur_val)
-                ss = int(round((dur_val - mm) * 60))
-                time_display = f"{mm:02d}:{ss:02d}"
+            try:
+                curr_str = self.entry_duration.get().strip()
+                if ":" in curr_str:
+                    c_parts = curr_str.split(":")
+                    curr_dur = int(c_parts[0]) + int(c_parts[1]) / 60.0
+                else:
+                    curr_dur = float(curr_str.replace(",", "."))
+            except ValueError:
+                curr_dur = 0.0
 
-            self.entry_duration.delete(0, tk.END)
-            self.entry_duration.insert(0, time_display)
-            self.last_ocr_data["duration_min"] = dur_val
-            self.last_ocr_data["time_str"] = time_display
-            status_parts.append(f"Zeit: {time_display}")
+            filtered_dur = self.stabilizer.filter_duration(dur_val, curr_dur)
+            if filtered_dur is not None:
+                if not time_display:
+                    mm = int(filtered_dur)
+                    ss = int(round((filtered_dur - mm) * 60))
+                    time_display = f"{mm:02d}:{ss:02d}"
 
-            st = (datetime.now() - timedelta(minutes=dur_val)).strftime("%H:%M")
-            self.entry_time.delete(0, tk.END)
-            self.entry_time.insert(0, st)
+                self.entry_duration.delete(0, tk.END)
+                self.entry_duration.insert(0, time_display)
+                self.last_ocr_data["duration_min"] = filtered_dur
+                self.last_ocr_data["time_str"] = time_display
+                status_parts.append(f"Zeit: {time_display}")
 
-        # 2. SPD (Tempo live aktualisieren)
+                st = (datetime.now() - timedelta(minutes=filtered_dur)).strftime("%H:%M")
+                self.entry_time.delete(0, tk.END)
+                self.entry_time.insert(0, st)
+
+        # 2. SPD (Tempo live mit Entprellung)
         if parsed["speed"] is not None:
-            self.entry_speed.delete(0, tk.END)
-            self.entry_speed.insert(0, f"{parsed['speed']:.1f}")
-            self.last_ocr_data["speed"] = parsed["speed"]
-            status_parts.append(f"Tempo: {parsed['speed']:.1f} km/h")
+            filtered_spd = self.stabilizer.filter_speed(parsed["speed"])
+            if filtered_spd is not None:
+                self.entry_speed.delete(0, tk.END)
+                self.entry_speed.insert(0, f"{filtered_spd:.1f}")
+                self.last_ocr_data["speed"] = filtered_spd
+                status_parts.append(f"Tempo: {filtered_spd:.1f} km/h")
 
-        # 3. DIST (Distanz live aktualisieren)
+        # 3. DIST (Distanz live mit Entprellung)
         if parsed["distance"] is not None:
-            new_dist = parsed["distance"]
-            self.entry_distance.delete(0, tk.END)
-            self.entry_distance.insert(0, f"{new_dist:.2f}")
-            self.last_ocr_data["distance"] = new_dist
-            status_parts.append(f"Distanz: {new_dist:.2f} km")
+            try:
+                curr_dist = float(self.entry_distance.get().strip().replace(",", "."))
+            except ValueError:
+                curr_dist = 0.0
 
-        # 4. STEP (Schritte live aktualisieren - auch 2- und 3-stellig)
+            filtered_dist = self.stabilizer.filter_distance(parsed["distance"], curr_dist)
+            if filtered_dist is not None:
+                self.entry_distance.delete(0, tk.END)
+                self.entry_distance.insert(0, f"{filtered_dist:.2f}")
+                self.last_ocr_data["distance"] = filtered_dist
+                status_parts.append(f"Distanz: {filtered_dist:.2f} km")
+
+        # 4. STEP (Schritte mit Sprungschutz: z.B. 360 -> 3603 wird blockiert!)
         if parsed["steps"] is not None:
-            new_steps = parsed["steps"]
-            self.entry_steps.delete(0, tk.END)
-            self.entry_steps.insert(0, str(new_steps))
-            self.last_ocr_data["steps"] = new_steps
-            status_parts.append(f"Schritte: {new_steps}")
+            try:
+                curr_steps = int(self.entry_steps.get().strip().replace(".", "").replace(",", ""))
+            except ValueError:
+                curr_steps = 0
+
+            filtered_steps = self.stabilizer.filter_steps(parsed["steps"], curr_steps)
+            if filtered_steps is not None:
+                self.entry_steps.delete(0, tk.END)
+                self.entry_steps.insert(0, str(filtered_steps))
+                self.last_ocr_data["steps"] = filtered_steps
+                status_parts.append(f"Schritte: {filtered_steps}")
 
         if status_parts:
             self.lbl_ocr_status.config(
