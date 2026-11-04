@@ -209,12 +209,15 @@ int main(int argc, char *argv[]) {{
     print(f"✅ {APP_NAME} erfolgreich erstellt!")
 
     # 4. Nach ~/Applications kopieren
-    USER_APPS_DIR.mkdir(parents=True, exist_ok=True)
-    target_user_app = USER_APPS_DIR / APP_NAME
-    if target_user_app.exists():
-        shutil.rmtree(target_user_app)
-    shutil.copytree(LOCAL_APP_PATH, target_user_app)
-    print(f"✅ Installiert in Benutzer-Programme: {target_user_app}")
+    try:
+        USER_APPS_DIR.mkdir(parents=True, exist_ok=True)
+        target_user_app = USER_APPS_DIR / APP_NAME
+        if target_user_app.exists():
+            shutil.rmtree(target_user_app)
+        shutil.copytree(LOCAL_APP_PATH, target_user_app)
+        print(f"✅ Installiert in Benutzer-Programme: {target_user_app}")
+    except Exception as e:
+        print(f"Hinweis zu ~/Applications: {e}")
 
     # 5. Nach /Applications kopieren (falls Schreibrechte vorhanden)
     try:

@@ -55,6 +55,7 @@ class DisplayOCRTestApp:
 
         self.camera_index = 0
         self.roi = [0.40, 0.20, 0.68, 0.50]
+        self.var_over_60 = tk.BooleanVar(value=False)
         self.load_config()
 
         self.cap = None
@@ -150,6 +151,7 @@ class DisplayOCRTestApp:
 
         self.lbl_time = ttk.Label(res_box, text="TIME : --:--", font=("Helvetica", 13, "bold"), foreground="#2563EB")
         self.lbl_time.pack(anchor="w", pady=2)
+        ttk.Checkbutton(res_box, text="> 60 Min. (hh:mm)", variable=self.var_over_60).pack(anchor="w", pady=(0, 4))
 
         self.lbl_spd = ttk.Label(res_box, text="SPD  : --.- km/h", font=("Helvetica", 13, "bold"), foreground="#10B981")
         self.lbl_spd.pack(anchor="w", pady=2)
@@ -281,14 +283,16 @@ class DisplayOCRTestApp:
 
                 custom_config = r"--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789.:SPDTIMEstep"
                 raw_text = pytesseract.image_to_string(thresh, config=custom_config).strip()
-                parsed = parse_walkingpad_display(raw_text)
+                parsed = parse_walkingpad_display(raw_text, is_over_60=self.var_over_60.get())
 
                 def _update_ui():
                     self.lbl_thresh.configure(image=thresh_photo, text="")
                     self.lbl_thresh.image = thresh_photo
 
                     if parsed["time_str"]:
-                        self.lbl_time.config(text=f"TIME : {parsed['time_str']}")
+                        mode_str = " (hh:mm)" if self.var_over_60.get() else " (mm:ss)"
+                        dur_info = f" -> {parsed['duration_min']:.1f} Min." if parsed['duration_min'] is not None else ""
+                        self.lbl_time.config(text=f"TIME : {parsed['time_str']}{mode_str}{dur_info}")
                     if parsed["speed"] is not None:
                         self.lbl_spd.config(text=f"SPD  : {parsed['speed']:.1f} km/h")
                     if parsed["distance"] is not None:

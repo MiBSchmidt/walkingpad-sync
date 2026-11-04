@@ -49,19 +49,24 @@ Da viele Walking Pads und kompakte Schreibtisch-Laufbänder keine offene Schnitt
    - **Live-Vorschau:** Ein separates Vorschaufenster („7-Segment-Filter“) zeigt in Echtzeit das binarisierte Display.
 
 4. **Werte & Formate:**
-   - **`TIME` (Dauer):** Im Format `mm:ss` (z. B. `06:13`, `25:30`).
+   - **`TIME` (Dauer):**
+     - **Unter 60 Minuten:** Display zeigt `mm:ss` (Minuten:Sekunden, z. B. `25:30` -> 25,5 Min.).
+     - **Ab 60 Minuten:** Das Walking Pad wechselt automatisch auf `hh:mm` (Stunden:Minuten, z. B. `01:15` -> 75 Min.). Die App erkennt dies automatisch anhand von Distanz-/Schritt-Schwellen und Vorlaufzeit, und bietet eine Checkbox `> 60 Min. (hh:mm)` zur manuellen Umschaltung.
    - **`SPD` (Tempo):** Dezimalzahl mit 1 Nachkommastelle in km/h (z. B. `3.2`, `4.0`).
    - **`DIST` (Distanz):** Dezimalzahl mit 2 Nachkommastellen in km (z. B. `1.25`, `0.80`).
-   - **`STEP` (Schritte):** Ganze Zahlen (z. B. `25`, `120`, `2580`) – erfasst auch 2- und 3-stellige Schritte zu Trainingsbeginn.
+   - **`STEP` (Schritte):** Ganze Zahlen (z. B. `120`, `764`, `2580`) mit Entprellung und Umschalt-Artefaktfilter (verhindert Sprünge durch Displaywechsel wie 360 -> 3603).
    - Alle Werte werden unabhängig voneinander live in die entsprechenden Felder geschrieben, sobald das Laufband das Display durchschaltet.
 
 5. **Automatische Startzeit-Berechnung:**
    - Die Startzeit wird automatisch berechnet: $\text{Startzeit} = \text{Aktuelle Uhrzeit} - \text{Trainingsdauer}$.
    - Beim Beenden des Workouts um 16:00 Uhr mit 25 Min. Dauer wird das Training für 15:35 bis 16:00 Uhr datiert.
-   - Kann manuell angepasst werden.
+   - Kann jederzeit manuell angepasst werden.
 
-6. **Google Health API v4 Upload:**
-   - Mit dem Button **`🚀 Training an Google Health senden`** werden Dauer, Schritte, Distanz und Geschwindigkeit als Walking-Workout (`fitness.walking`) synchronisiert.
+6. **Bearbeitbarer Bestätigungsdialog & Google Health API v4 Upload:**
+   - Klick auf **`🚀 Training an Google Health senden`** öffnet ein **editierbares Bestätigungsfenster**:
+     - Alle Werte (Dauer, Format, Tempo, Distanz, Schritte, Startzeit) können vor dem endgültigen Absenden nochmals überprüft und bei Bedarf korrigiert werden.
+     - Dynamische Live-Vorschau von berechnetem Trainingszeitraum (`Start – Ende`) und geschätztem Kalorienverbrauch.
+   - Nach Bestätigung werden die Daten an Google Health v4 übertragen und die von Google akzeptierten Werte im Erfolgsdialog angezeigt.
 
 ---
 
@@ -113,16 +118,20 @@ pip install opencv-python pillow pytesseract requests google-auth google-auth-oa
 
 ## ▶️ App starten
 
-### Option A: Per Doppelklick im Finder (Empfohlen)
-Einfach die Datei **`run.command`** im Projektordner doppelklicken.
+### Option A: Als native macOS App (Im Programme-Ordner / Dock)
+Die App liegt direkt als eigenständige macOS-Anwendung **`WalkingPad Sync.app`** im Benutzer-Programme-Ordner (`~/Applications` bzw. `/Applications`) und kann dauerhaft ins **Dock** gezogen werden.
 
-### Option B: Über das Terminal
+Zum Erstellen oder Aktualisieren der App einfach ausführen:
+```bash
+./venv/bin/python create_macos_app.py
+```
+
+### Option B: Per Doppelklick im Finder
+Die Datei **`run.command`** im Projektordner doppelklicken.
+
+### Option C: Über das Terminal
 ```bash
 ./venv/bin/python app.py
-```
-*oder:*
-```bash
-./venv/bin/python walkingpad_logger.py
 ```
 
 ---
