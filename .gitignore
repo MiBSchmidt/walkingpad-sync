@@ -228,3 +228,4 @@ token.json
 !assets/*.png
 *.app
 error.log
+commit_id.txt
