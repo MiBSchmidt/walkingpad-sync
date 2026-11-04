@@ -30,6 +30,7 @@ from PIL import Image, ImageTk
 from walkingpad_logger import (
     preprocess_segment_display,
     parse_walkingpad_display,
+    get_git_commit_id,
     BASE_DIR,
     KNOWN_CAMERAS
 )
@@ -50,7 +51,8 @@ for candidate in [
 class DisplayOCRTestApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("🔍 Walking Pad Display OCR - 7-Segment Tester")
+        self.commit_id = get_git_commit_id()
+        self.root.title(f"🔍 Walking Pad Display OCR - 7-Segment Tester (Commit: {self.commit_id})")
         self.root.geometry("920x680")
 
         self.camera_index = 0

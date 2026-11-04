@@ -72,6 +72,34 @@ for candidate in [
         break
 
 
+def get_git_commit_id() -> str:
+    """Gibt die kurze Git-Commit-ID (z. B. 50203e2) zurück."""
+    commit_file = BASE_DIR / "commit_id.txt"
+    if commit_file.exists():
+        try:
+            val = commit_file.read_text(encoding="utf-8").strip()
+            if val:
+                return val
+        except Exception:
+            pass
+
+    try:
+        res = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(BASE_DIR),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=2
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            return res.stdout.strip()
+    except Exception:
+        pass
+
+    return "dev"
+
+
 # ---------------------------------------------------------------------------
 # Google Health API Authentifizierung & Upload
 # ---------------------------------------------------------------------------
@@ -890,7 +918,8 @@ class WorkoutConfirmDialog(tk.Toplevel):
 class WalkingPadApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Skandika Walking Pad Sync & OCR")
+        self.commit_id = get_git_commit_id()
+        self.root.title(f"Skandika Walking Pad Sync & OCR (Commit: {self.commit_id})")
         self.root.geometry("920x640")
         self.root.minsize(860, 580)
 
@@ -1124,6 +1153,16 @@ class WalkingPadApp:
             font=("Helvetica", 12, "bold")
         )
         self.btn_submit.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(15, 5))
+        row += 1
+
+        # Version & Git-Commit Statuszeile
+        lbl_version = ttk.Label(
+            manual_box,
+            text=f"Version: Git Commit {self.commit_id}",
+            font=("Helvetica", 8),
+            foreground="#9CA3AF"
+        )
+        lbl_version.grid(row=row, column=0, columnspan=2, sticky="e", pady=(4, 0))
 
     def on_camera_combo_change(self, event=None):
         val = self.combo_cam.get()

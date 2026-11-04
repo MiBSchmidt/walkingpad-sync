@@ -99,8 +99,27 @@ def build_app():
     macos_dir.mkdir(parents=True, exist_ok=True)
     res_dir.mkdir(parents=True, exist_ok=True)
 
+    # Commit-ID ermitteln und speichern
+    try:
+        git_res = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(REPO_DIR),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=2
+        )
+        commit_id = git_res.stdout.strip() if git_res.returncode == 0 and git_res.stdout.strip() else "dev"
+    except Exception:
+        commit_id = "dev"
+
+    with open(REPO_DIR / "commit_id.txt", "w", encoding="utf-8") as f:
+        f.write(commit_id)
+    with open(res_dir / "commit_id.txt", "w", encoding="utf-8") as f:
+        f.write(commit_id)
+
     # 1. Info.plist
-    info_plist_content = """<?xml version="1.0" encoding="UTF-8"?>
+    info_plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -117,9 +136,9 @@ def build_app():
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
+    <string>1.0.0 ({commit_id})</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>{commit_id}</string>
     <key>LSMinimumSystemVersion</key>
     <string>11.0</string>
     <key>NSHighResolutionCapable</key>
