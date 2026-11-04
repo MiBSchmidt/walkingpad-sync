@@ -307,6 +307,10 @@ def parse_duration_to_minutes(dur_str: str, is_over_60: bool = False) -> float:
         v1 = int(parts[0])
         v2 = int(parts[1])
         if is_over_60:
+            # Plausibilität: Auf einem Walking Pad läuft niemand 13 Stunden oder 59 Stunden!
+            # Wenn v1 > 12 (z. B. 59:54), kann es kein hh:mm sein, sondern ist mm:ss
+            if v1 > 12:
+                return round(v1 + v2 / 60.0, 2)
             return round(v1 * 60.0 + v2, 2)
         else:
             if v1 >= 60:
@@ -359,8 +363,11 @@ def parse_walkingpad_display(raw_text: str, is_over_60: bool = False) -> Dict[st
         if 0 <= v2 < 60:
             result["time_str"] = f"{v1:02d}:{v2:02d}"
             if is_over_60:
-                # Stunde:Minute (z. B. 01:15 -> 75.0 Min)
-                result["duration_min"] = round(v1 * 60.0 + v2, 2)
+                # Stunde:Minute (z. B. 01:15 -> 75.0 Min, oder 1:02 -> 62.0 Min)
+                if v1 > 12:
+                    result["duration_min"] = round(v1 + v2 / 60.0, 2)
+                else:
+                    result["duration_min"] = round(v1 * 60.0 + v2, 2)
             else:
                 # Minute:Sekunde (z. B. 25:30 -> 25.5 Min)
                 result["duration_min"] = round(v1 + v2 / 60.0, 2)
@@ -511,11 +518,16 @@ class ValueStabilizer:
 
         if current_gui_val > 0.0:
             diff = new_val - current_gui_val
-            if diff > 1.5 or diff < -1.5:
+            # Erlaube Übergang von < 60 Min auf >= 60 Min (z. B. von 59.9 Min auf 60.0 bis 70.0 Min)
+            if current_gui_val >= 50.0 and 60.0 <= new_val <= 75.0:
+                pass
+            # Normaler Zeitschritt: max 3.5 Minuten vorwärts (Display-Zyklus dauert ~12-15s,
+            # bei 1 verpassten Zyklus bis zu 2 Min) und max 1.5 Min rückwärts (Toleranz für minimale Ableseschwankung)
+            elif diff > 3.5 or diff < -1.5:
                 return None
 
         cand = self.candidates.get("duration")
-        if cand and abs(cand["val"] - new_val) <= 0.25:
+        if cand and abs(cand["val"] - new_val) <= 0.35:
             cand["count"] += 1
             cand["val"] = new_val
             if cand["count"] >= 2:
@@ -1348,8 +1360,8 @@ class WalkingPadApp:
                 curr_dur = 0.0
 
             # Automatische Erkennung des Wechsels von < 60 Min auf >= 60 Min:
-            # Wenn das Display 01:xx anzeigt, aber die Checkbox noch auf < 60 Min steht:
-            if not self.var_over_60.get() and time_display and re.match(r"^0?1:\d{2}$", time_display):
+            # Wenn das Display 01:xx oder 1:xx anzeigt, aber die Checkbox noch auf < 60 Min steht:
+            if not self.var_over_60.get() and time_display and re.match(r"^0?[1-9]:\d{2}$", time_display):
                 try:
                     curr_dist = float(self.entry_distance.get().strip().replace(",", ".") or 0)
                 except ValueError:
@@ -1366,7 +1378,10 @@ class WalkingPadApp:
                     # Neuberechnen mit is_over_60 = True
                     parts = time_display.split(":")
                     dur_val = int(parts[0]) * 60.0 + int(parts[1])
+                    time_display = f"{int(parts[0]):02d}:{int(parts[1]):02d}"
                     curr_dur = dur_val
+                    # Bei erkanntem Stundenwechsel den neuen Stundenwert sofort verankern:
+                    self.stabilizer.candidates["duration"] = {"val": dur_val, "count": 2}
 
             filtered_dur = self.stabilizer.filter_duration(dur_val, curr_dur)
             if filtered_dur is not None:
