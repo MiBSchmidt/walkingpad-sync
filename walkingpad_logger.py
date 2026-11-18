@@ -32,6 +32,7 @@ import requests
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
+from google.auth.exceptions import RefreshError
 
 # ---------------------------------------------------------------------------
 # Basis-Pfade und Google-Health-Konfiguration
@@ -103,8 +104,25 @@ def get_git_commit_id() -> str:
 # ---------------------------------------------------------------------------
 # Google Health API Authentifizierung & Upload
 # ---------------------------------------------------------------------------
-def get_credentials() -> Credentials:
-    """Lädt oder erneuert die OAuth-Credentials für Google Health v4."""
+AUTH_OK = "ok"                      # Token gültig bzw. erfolgreich erneuert
+AUTH_LOGIN_REQUIRED = "login"       # Kein/abgelaufener Token -> Browser-Login nötig
+AUTH_NO_CLIENT_SECRET = "no_secret" # client_secret.json fehlt
+AUTH_OFFLINE = "offline"            # Google nicht erreichbar (kein Internet)
+
+
+def _save_credentials(creds: Credentials) -> None:
+    with open(TOKEN_FILE, "w", encoding="utf-8") as f:
+        f.write(creds.to_json())
+
+
+def try_silent_credentials() -> Tuple[str, Optional[Credentials]]:
+    """
+    Prüft OHNE Browser, ob ein gültiger Login vorliegt, und erneuert den
+    Zugriffstoken bei Bedarf über den Refresh-Token.
+    """
+    if not CLIENT_SECRETS_FILE.exists():
+        return AUTH_NO_CLIENT_SECRET, None
+
     creds = None
     if TOKEN_FILE.exists():
         try:
@@ -112,21 +130,52 @@ def get_credentials() -> Credentials:
         except Exception:
             creds = None
 
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            if not CLIENT_SECRETS_FILE.exists():
-                raise FileNotFoundError(
-                    f"client_secret.json nicht gefunden in:\n{BASE_DIR}\n"
-                    "Bitte erstelle oder kopiere die Google OAuth-Client-Secret-Datei dorthin."
-                )
-            flow = InstalledAppFlow.from_client_secrets_file(str(CLIENT_SECRETS_FILE), SCOPES)
-            creds = flow.run_local_server(port=8080)
+    if creds and creds.valid:
+        return AUTH_OK, creds
 
-        with open(TOKEN_FILE, "w", encoding="utf-8") as f:
-            f.write(creds.to_json())
+    if creds and creds.refresh_token:
+        try:
+            creds.refresh(Request())
+            _save_credentials(creds)
+            return AUTH_OK, creds
+        except RefreshError:
+            # Refresh-Token abgelaufen/widerrufen (z. B. 7-Tage-Limit im
+            # OAuth-Testmodus) -> alten Token verwerfen.
+            TOKEN_FILE.unlink(missing_ok=True)
+        except Exception:
+            return AUTH_OFFLINE, None
+
+    return AUTH_LOGIN_REQUIRED, None
+
+
+def interactive_login() -> Credentials:
+    """Öffnet den Browser für die Google-Anmeldung und speichert den Token."""
+    if not CLIENT_SECRETS_FILE.exists():
+        raise FileNotFoundError(
+            f"client_secret.json nicht gefunden in:\n{BASE_DIR}\n"
+            "Bitte erstelle oder kopiere die Google OAuth-Client-Secret-Datei dorthin."
+        )
+    flow = InstalledAppFlow.from_client_secrets_file(str(CLIENT_SECRETS_FILE), SCOPES)
+    # access_type=offline + prompt=consent garantiert einen Refresh-Token
+    creds = flow.run_local_server(
+        port=8080,
+        access_type="offline",
+        prompt="consent",
+        timeout_seconds=300,
+        success_message="Anmeldung erfolgreich – du kannst dieses Fenster schließen und zu WalkingPad Sync zurückkehren.",
+    )
+    _save_credentials(creds)
     return creds
+
+
+def get_credentials() -> Credentials:
+    """Lädt oder erneuert die OAuth-Credentials; meldet sich notfalls neu an."""
+    state, creds = try_silent_credentials()
+    if state == AUTH_OK and creds is not None:
+        return creds
+    if state == AUTH_OFFLINE:
+        raise ConnectionError("Google ist nicht erreichbar. Bitte Internetverbindung prüfen.")
+    return interactive_login()
 
 
 def upload_workout_data(
@@ -566,22 +615,85 @@ class ValueStabilizer:
 
 
 # ---------------------------------------------------------------------------
+# Design-System: Farben, Schriften & ttk-Styles (dunkles Theme)
+# ---------------------------------------------------------------------------
+THEME = {
+    "bg":        "#0F1216",   # Fensterhintergrund
+    "card":      "#181C22",   # Karten
+    "tile":      "#20252D",   # Werte-Kacheln / Eingabefelder
+    "border":    "#2B323C",
+    "text":      "#E8EAED",
+    "muted":     "#8D96A3",
+    "faint":     "#5C6573",
+    "accent":    "#10B981",   # Smaragdgrün
+    "accent_hi": "#059669",
+    "warn":      "#F59E0B",
+    "error":     "#F87171",
+    "info":      "#60A5FA",
+    "video_bg":  "#0A0C0F",
+}
+FONT = "Helvetica Neue"
+
+
+def setup_styles(root: tk.Misc) -> None:
+    """Konfiguriert ttk für das dunkle Theme (clam erlaubt freie Farben)."""
+    style = ttk.Style(root)
+    try:
+        style.theme_use("clam")
+    except tk.TclError:
+        pass
+    t = THEME
+    style.configure(
+        "Dark.TCheckbutton",
+        background=t["card"], foreground=t["text"], font=(FONT, 11),
+        indicatorbackground=t["tile"], indicatorforeground=t["accent"],
+        focuscolor=t["card"], borderwidth=0,
+    )
+    style.map(
+        "Dark.TCheckbutton",
+        background=[("active", t["card"])],
+        indicatorbackground=[("selected", t["tile"]), ("active", t["border"])],
+    )
+    style.configure(
+        "Dark.TCombobox",
+        fieldbackground=t["tile"], background=t["tile"], foreground=t["text"],
+        arrowcolor=t["muted"], bordercolor=t["border"], lightcolor=t["tile"],
+        darkcolor=t["tile"], selectbackground=t["tile"], selectforeground=t["text"],
+        padding=4,
+    )
+    style.map(
+        "Dark.TCombobox",
+        fieldbackground=[("readonly", t["tile"])],
+        foreground=[("readonly", t["text"])],
+        selectbackground=[("readonly", t["tile"])],
+        selectforeground=[("readonly", t["text"])],
+    )
+    root.option_add("*TCombobox*Listbox.background", t["tile"])
+    root.option_add("*TCombobox*Listbox.foreground", t["text"])
+    root.option_add("*TCombobox*Listbox.selectBackground", t["accent_hi"])
+    root.option_add("*TCombobox*Listbox.selectForeground", "#FFFFFF")
+    root.option_add("*TCombobox*Listbox.font", (FONT, 11))
+
+
+# ---------------------------------------------------------------------------
 # Moderner, kontrastreicher Button für macOS (vermeidet hellgraues Auswaschen)
 # ---------------------------------------------------------------------------
 class ModernButton(tk.Frame):
     """
-    Garantiert satten, leuchtenden Hintergrund mit scharfer weißer Schrift auf macOS.
-    (Standard-tk.Button erzwingt auf macOS Aqua ein hellgraues Bezel, was weiße Schrift unlesbar macht).
+    Flacher Button mit sattem Hintergrund und Hover-Effekt.
+    (Standard-tk.Button erzwingt auf macOS Aqua ein hellgraues Bezel.)
     """
     def __init__(
         self,
         parent,
         text: str,
-        command,
-        bg: str = "#059669",
+        command=None,
+        bg: str = THEME["accent_hi"],
         fg: str = "#FFFFFF",
-        hover_bg: str = "#047857",
-        font=("Helvetica", 12, "bold"),
+        hover_bg: str = THEME["accent"],
+        font=(FONT, 13, "bold"),
+        padx: int = 14,
+        pady: int = 10,
         **kwargs
     ):
         super().__init__(parent, bg=bg, cursor="hand2", **kwargs)
@@ -592,14 +704,8 @@ class ModernButton(tk.Frame):
         self.enabled = True
 
         self.lbl = tk.Label(
-            self,
-            text=text,
-            bg=bg,
-            fg=fg,
-            font=font,
-            cursor="hand2",
-            padx=14,
-            pady=10
+            self, text=text, bg=bg, fg=fg, font=font,
+            cursor="hand2", padx=padx, pady=pady
         )
         self.lbl.pack(fill="both", expand=True)
 
@@ -628,8 +734,8 @@ class ModernButton(tk.Frame):
 
         if state == "disabled":
             self.enabled = False
-            self.configure(bg="#9CA3AF", cursor="arrow")
-            self.lbl.configure(bg="#9CA3AF", fg="#F3F4F6", cursor="arrow")
+            self.configure(bg=THEME["border"], cursor="arrow")
+            self.lbl.configure(bg=THEME["border"], fg=THEME["muted"], cursor="arrow")
         elif state == "normal":
             self.enabled = True
             self.configure(bg=self.bg, cursor="hand2")
@@ -637,6 +743,82 @@ class ModernButton(tk.Frame):
 
         if text is not None:
             self.lbl.configure(text=text)
+
+
+def ghost_button(parent, text: str, command) -> ModernButton:
+    """Dezenter Sekundär-Button."""
+    return ModernButton(
+        parent, text=text, command=command, bg=THEME["tile"], hover_bg=THEME["border"],
+        fg=THEME["text"], font=(FONT, 11), padx=10, pady=6
+    )
+
+
+def make_card(parent, title: Optional[str] = None) -> Tuple[tk.Frame, tk.Frame]:
+    """Erzeugt eine Karte mit optionaler Überschrift. Gibt (Karte, Inhalt) zurück."""
+    card = tk.Frame(parent, bg=THEME["card"], highlightthickness=1,
+                    highlightbackground=THEME["border"])
+    body = tk.Frame(card, bg=THEME["card"])
+    body.pack(fill="both", expand=True, padx=14, pady=12)
+    if title:
+        tk.Label(body, text=title.upper(), bg=THEME["card"], fg=THEME["muted"],
+                 font=(FONT, 10, "bold")).pack(anchor="w", pady=(0, 8))
+    return card, body
+
+
+def make_entry(parent, font_size: int = 13, width: int = 10, bg: str = THEME["tile"]) -> tk.Entry:
+    """Flaches, dunkles Eingabefeld mit grünem Fokus-Rahmen."""
+    return tk.Entry(
+        parent, width=width, font=(FONT, font_size), bg=bg, fg=THEME["text"],
+        insertbackground=THEME["text"], relief="flat", bd=0,
+        highlightthickness=1, highlightbackground=THEME["border"],
+        highlightcolor=THEME["accent"], selectbackground=THEME["accent_hi"],
+        selectforeground="#FFFFFF",
+    )
+
+
+class MetricTile(tk.Frame):
+    """Große Kachel für einen Trainingswert (editierbar) mit kurzem Aufleuchten bei OCR-Updates."""
+    def __init__(self, parent, title: str, unit: str, initial: str):
+        super().__init__(parent, bg=THEME["tile"], highlightthickness=1,
+                         highlightbackground=THEME["border"])
+        inner = tk.Frame(self, bg=THEME["tile"])
+        inner.pack(fill="both", expand=True, padx=14, pady=10)
+
+        head = tk.Frame(inner, bg=THEME["tile"])
+        head.pack(fill="x")
+        tk.Label(head, text=title.upper(), bg=THEME["tile"], fg=THEME["muted"],
+                 font=(FONT, 10, "bold")).pack(side="left")
+        self.lbl_unit = tk.Label(head, text=unit, bg=THEME["tile"], fg=THEME["faint"],
+                                 font=(FONT, 10))
+        self.lbl_unit.pack(side="right")
+
+        self.entry = tk.Entry(
+            inner, width=7, font=(FONT, 30, "bold"), bg=THEME["tile"], fg=THEME["text"],
+            insertbackground=THEME["text"], relief="flat", bd=0, highlightthickness=0,
+            selectbackground=THEME["accent_hi"], selectforeground="#FFFFFF",
+        )
+        self.entry.pack(fill="x", pady=(4, 0))
+        self.entry.insert(0, initial)
+
+        self._flash_job = None
+        # Enter/Esc beendet die Bearbeitung, damit die Live-Erkennung wieder schreiben darf
+        for key in ("<Return>", "<Escape>"):
+            self.entry.bind(key, lambda e: self.winfo_toplevel().focus_set())
+        self.entry.bind("<FocusIn>", lambda e: self.configure(highlightbackground=THEME["accent"]))
+        self.entry.bind("<FocusOut>", lambda e: self.configure(highlightbackground=THEME["border"]))
+
+    def set_unit(self, unit: str):
+        self.lbl_unit.configure(text=unit)
+
+    def flash(self):
+        """Kurzes grünes Aufleuchten, wenn ein neuer Wert erkannt wurde."""
+        if self.focus_get() is self.entry:
+            return
+        self.configure(highlightbackground=THEME["accent"])
+        if self._flash_job:
+            self.after_cancel(self._flash_job)
+        self._flash_job = self.after(
+            600, lambda: self.configure(highlightbackground=THEME["border"]))
 
 
 # ---------------------------------------------------------------------------
@@ -653,7 +835,8 @@ class WorkoutConfirmDialog(tk.Toplevel):
     def __init__(self, parent: tk.Tk, initial_data: Dict[str, Any]):
         super().__init__(parent)
         self.parent = parent
-        self.title("🏋️‍♂️ Trainingsdaten vor dem Senden prüfen & anpassen")
+        self.title("Training prüfen")
+        self.configure(bg=THEME["card"])
         self.resizable(False, False)
 
         self.confirmed = False
@@ -668,6 +851,8 @@ class WorkoutConfirmDialog(tk.Toplevel):
         self.transient(parent)
         self.grab_set()
         self.protocol("WM_DELETE_WINDOW", self._on_cancel)
+        self.bind("<Escape>", lambda e: self._on_cancel())
+        self.bind("<Return>", lambda e: self._on_submit())
 
         # Dialog über Parent zentrieren
         self.update_idletasks()
@@ -684,130 +869,76 @@ class WorkoutConfirmDialog(tk.Toplevel):
         self.entry_dur.focus_set()
 
     def _build_ui(self):
-        main_box = ttk.Frame(self, padding=16)
-        main_box.pack(fill="both", expand=True)
+        t = THEME
+        main_box = tk.Frame(self, bg=t["card"])
+        main_box.pack(fill="both", expand=True, padx=22, pady=20)
 
         # Header
-        header = ttk.Frame(main_box)
-        header.pack(fill="x", pady=(0, 12))
-        ttk.Label(
-            header,
-            text="📋 Trainingsdaten überprüfen & bearbeiten",
-            font=("Helvetica", 13, "bold"),
-            foreground="#111827"
-        ).pack(anchor="w")
-        ttk.Label(
-            header,
-            text="Du kannst alle Werte vor dem Absenden an Google Health hier korrigieren:",
-            font=("Helvetica", 9),
-            foreground="#4B5563"
-        ).pack(anchor="w", pady=(2, 0))
+        tk.Label(main_box, text="Training prüfen", bg=t["card"], fg=t["text"],
+                 font=(FONT, 18, "bold")).pack(anchor="w")
+        tk.Label(main_box, text="Korrigiere die Werte bei Bedarf, bevor sie an Google Health gehen.",
+                 bg=t["card"], fg=t["muted"], font=(FONT, 11)).pack(anchor="w", pady=(2, 16))
 
         # Formular
-        form = ttk.LabelFrame(main_box, text="Trainings-Parameter", padding=12)
-        form.pack(fill="x", pady=(0, 12))
+        form = tk.Frame(main_box, bg=t["card"])
+        form.pack(fill="x")
+        form.columnconfigure(1, weight=1)
+
+        def row_label(r: int, text: str):
+            tk.Label(form, text=text, bg=t["card"], fg=t["muted"],
+                     font=(FONT, 12)).grid(row=r, column=0, sticky="w", padx=(0, 18), pady=6)
+
+        def unit_label(parent, text: str):
+            tk.Label(parent, text=text, bg=t["card"], fg=t["faint"],
+                     font=(FONT, 11)).pack(side="left", padx=(8, 0))
+
+        def entry_row(r: int, label: str, initial: str, unit: Optional[str]) -> Tuple[tk.Frame, tk.Entry]:
+            row_label(r, label)
+            fr = tk.Frame(form, bg=t["card"])
+            fr.grid(row=r, column=1, sticky="w", pady=6)
+            ent = make_entry(fr, font_size=14, width=9)
+            ent.pack(side="left", ipady=4)
+            ent.insert(0, initial)
+            ent.bind("<KeyRelease>", self._on_values_changed)
+            if unit:
+                unit_label(fr, unit)
+            return fr, ent
 
         # 1. Dauer
-        ttk.Label(form, text="Dauer:", font=("Helvetica", 10, "bold")).grid(row=0, column=0, sticky="w", pady=5)
-        dur_frame = ttk.Frame(form)
-        dur_frame.grid(row=0, column=1, sticky="w", pady=5)
-
-        self.entry_dur = ttk.Entry(dur_frame, width=10, font=("Helvetica", 11))
-        self.entry_dur.pack(side="left", padx=(0, 8))
-        self.entry_dur.insert(0, str(self.initial_data.get("duration_str", "00:00")))
-        self.entry_dur.bind("<KeyRelease>", self._on_values_changed)
-
+        dur_frame, self.entry_dur = entry_row(0, "Dauer", str(self.initial_data.get("duration_str", "00:00")), None)
         self.chk_over_60 = ttk.Checkbutton(
-            dur_frame,
-            text="> 60 Min. (hh:mm)",
-            variable=self.var_over_60,
-            command=self._on_over_60_changed
+            dur_frame, text="über 60 Min. (hh:mm)", variable=self.var_over_60,
+            command=self._on_over_60_changed, style="Dark.TCheckbutton"
         )
-        self.chk_over_60.pack(side="left")
+        self.chk_over_60.pack(side="left", padx=(12, 0))
 
-        self.lbl_dur_sub = ttk.Label(
-            form,
-            text="",
-            font=("Helvetica", 8, "italic"),
-            foreground="#2563EB"
+        self.lbl_dur_sub = tk.Label(form, text="", bg=t["card"], fg=t["info"], font=(FONT, 10))
+        self.lbl_dur_sub.grid(row=1, column=1, sticky="w", pady=(0, 4))
+
+        # 2.–5. Weitere Werte
+        _, self.entry_spd = entry_row(2, "Tempo", str(self.initial_data.get("speed_str", "0.0")), "km/h")
+        _, self.entry_dist = entry_row(3, "Distanz", str(self.initial_data.get("distance_str", "0.00")), "km")
+        _, self.entry_steps = entry_row(4, "Schritte", str(self.initial_data.get("steps_str", "0")), None)
+        _, self.entry_start = entry_row(
+            5, "Startzeit",
+            str(self.initial_data.get("start_time_str", datetime.now().strftime("%H:%M"))), "Uhr"
         )
-        self.lbl_dur_sub.grid(row=1, column=1, sticky="w", pady=(0, 6))
-
-        # 2. Tempo
-        ttk.Label(form, text="Tempo:", font=("Helvetica", 10, "bold")).grid(row=2, column=0, sticky="w", pady=5)
-        spd_frame = ttk.Frame(form)
-        spd_frame.grid(row=2, column=1, sticky="w", pady=5)
-        self.entry_spd = ttk.Entry(spd_frame, width=10, font=("Helvetica", 11))
-        self.entry_spd.pack(side="left", padx=(0, 6))
-        self.entry_spd.insert(0, str(self.initial_data.get("speed_str", "0.0")))
-        self.entry_spd.bind("<KeyRelease>", self._on_values_changed)
-        ttk.Label(spd_frame, text="km/h", foreground="#4B5563").pack(side="left")
-
-        # 3. Distanz
-        ttk.Label(form, text="Distanz:", font=("Helvetica", 10, "bold")).grid(row=3, column=0, sticky="w", pady=5)
-        dist_frame = ttk.Frame(form)
-        dist_frame.grid(row=3, column=1, sticky="w", pady=5)
-        self.entry_dist = ttk.Entry(dist_frame, width=10, font=("Helvetica", 11))
-        self.entry_dist.pack(side="left", padx=(0, 6))
-        self.entry_dist.insert(0, str(self.initial_data.get("distance_str", "0.00")))
-        self.entry_dist.bind("<KeyRelease>", self._on_values_changed)
-        ttk.Label(dist_frame, text="km", foreground="#4B5563").pack(side="left")
-
-        # 4. Schritte
-        ttk.Label(form, text="Schritte:", font=("Helvetica", 10, "bold")).grid(row=4, column=0, sticky="w", pady=5)
-        steps_frame = ttk.Frame(form)
-        steps_frame.grid(row=4, column=1, sticky="w", pady=5)
-        self.entry_steps = ttk.Entry(steps_frame, width=10, font=("Helvetica", 11))
-        self.entry_steps.pack(side="left", padx=(0, 6))
-        self.entry_steps.insert(0, str(self.initial_data.get("steps_str", "0")))
-        self.entry_steps.bind("<KeyRelease>", self._on_values_changed)
-        ttk.Label(steps_frame, text="Schritte", foreground="#4B5563").pack(side="left")
-
-        # 5. Startzeit
-        ttk.Label(form, text="Startzeit:", font=("Helvetica", 10, "bold")).grid(row=5, column=0, sticky="w", pady=5)
-        start_frame = ttk.Frame(form)
-        start_frame.grid(row=5, column=1, sticky="w", pady=5)
-        self.entry_start = ttk.Entry(start_frame, width=10, font=("Helvetica", 11))
-        self.entry_start.pack(side="left", padx=(0, 6))
-        self.entry_start.insert(0, str(self.initial_data.get("start_time_str", datetime.now().strftime("%H:%M"))))
-        self.entry_start.bind("<KeyRelease>", self._on_values_changed)
-        ttk.Label(start_frame, text="Uhr (HH:MM)", foreground="#4B5563").pack(side="left")
 
         # Dynamische Vorschau-Karte
-        preview_box = ttk.Frame(main_box, relief="groove", padding=10)
-        preview_box.pack(fill="x", pady=(0, 14))
-
-        self.lbl_calc_period = ttk.Label(
-            preview_box,
-            text="🕒 Zeitraum: --:-- bis --:-- Uhr",
-            font=("Helvetica", 9, "bold"),
-            foreground="#1F2937"
-        )
-        self.lbl_calc_period.pack(anchor="w")
-
-        self.lbl_calc_calories = ttk.Label(
-            preview_box,
-            text="🔥 Geschätzter Verbrauch: ~0 kcal",
-            font=("Helvetica", 9),
-            foreground="#4B5563"
-        )
-        self.lbl_calc_calories.pack(anchor="w", pady=(3, 0))
+        preview_box = tk.Frame(main_box, bg=t["tile"])
+        preview_box.pack(fill="x", pady=(16, 18))
+        self.lbl_calc_period = tk.Label(preview_box, text="🕒 Zeitraum: --:-- bis --:-- Uhr",
+                                        bg=t["tile"], fg=t["text"], font=(FONT, 12, "bold"))
+        self.lbl_calc_period.pack(anchor="w", padx=14, pady=(10, 2))
+        self.lbl_calc_calories = tk.Label(preview_box, text="🔥 Geschätzter Verbrauch: ~0 kcal",
+                                          bg=t["tile"], fg=t["muted"], font=(FONT, 11))
+        self.lbl_calc_calories.pack(anchor="w", padx=14, pady=(0, 10))
 
         # Buttons
-        btn_bar = ttk.Frame(main_box)
+        btn_bar = tk.Frame(main_box, bg=t["card"])
         btn_bar.pack(fill="x")
-
-        ttk.Button(btn_bar, text="❌ Abbrechen", command=self._on_cancel, width=14).pack(side="left")
-
-        self.btn_submit = ModernButton(
-            btn_bar,
-            text="🚀 Jetzt an Google Health senden",
-            command=self._on_submit,
-            bg="#059669",
-            hover_bg="#047857",
-            fg="#FFFFFF",
-            font=("Helvetica", 11, "bold")
-        )
+        ghost_button(btn_bar, "Abbrechen", self._on_cancel).pack(side="left")
+        self.btn_submit = ModernButton(btn_bar, text="An Google Health senden  →", command=self._on_submit)
         self.btn_submit.pack(side="right")
 
         self._on_values_changed()
@@ -915,13 +1046,18 @@ class WorkoutConfirmDialog(tk.Toplevel):
 # ---------------------------------------------------------------------------
 # Hauptanwendung mit Tkinter GUI
 # ---------------------------------------------------------------------------
+AUTH_RECHECK_MS = 30 * 60 * 1000  # Google-Login alle 30 Minuten still prüfen
+
+
 class WalkingPadApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.commit_id = get_git_commit_id()
-        self.root.title(f"Skandika Walking Pad Sync & OCR (Commit: {self.commit_id})")
-        self.root.geometry("920x640")
-        self.root.minsize(860, 580)
+        self.root.title(f"WalkingPad Sync ({self.commit_id})")
+        self.root.configure(bg=THEME["bg"])
+        self.root.geometry("1060x700")
+        self.root.minsize(980, 640)
+        setup_styles(self.root)
 
         # Entprell- und Plausibilitäts-Filter
         self.stabilizer = ValueStabilizer()
@@ -938,6 +1074,10 @@ class WalkingPadApp:
         self.camera_running = False
         self.current_frame: Optional[np.ndarray] = None
         self.ocr_in_progress = False
+
+        # Google-Login-Status
+        self.auth_state: Optional[str] = None
+        self.login_in_progress = False
 
         # Letzte OCR-Werte
         self.last_ocr_data = {
@@ -961,6 +1101,9 @@ class WalkingPadApp:
 
         # Update-Schleife
         self.root.after(30, self.update_camera_frame)
+
+        # Google-Login direkt beim Start prüfen (nicht erst beim Senden)
+        self.root.after(400, lambda: self.check_auth(prompt_login=True))
 
     def load_config(self):
         if CONFIG_FILE.exists():
@@ -990,20 +1133,59 @@ class WalkingPadApp:
         self.save_config()
 
     def build_gui(self):
-        main_frame = ttk.Frame(self.root, padding=12)
-        main_frame.pack(fill="both", expand=True)
+        t = THEME
+        outer = tk.Frame(self.root, bg=t["bg"])
+        outer.pack(fill="both", expand=True, padx=18, pady=14)
 
-        left_col = ttk.Frame(main_frame)
-        left_col.pack(side="left", fill="both", expand=True, padx=(0, 10))
+        # ==================== KOPFZEILE ====================
+        header = tk.Frame(outer, bg=t["bg"])
+        header.pack(fill="x", pady=(0, 14))
 
-        right_col = ttk.Frame(main_frame, width=380)
-        right_col.pack(side="right", fill="both", expand=False)
+        title_box = tk.Frame(header, bg=t["bg"])
+        title_box.pack(side="left")
+        tk.Label(title_box, text="WalkingPad Sync", bg=t["bg"], fg=t["text"],
+                 font=(FONT, 22, "bold")).pack(anchor="w")
+        tk.Label(title_box, text="Display ablesen · prüfen · an Google Health senden",
+                 bg=t["bg"], fg=t["muted"], font=(FONT, 11)).pack(anchor="w")
 
-        # ==================== LINKE SPALTE: Webcam & Fester Rahmen ====================
-        cam_header = ttk.Frame(left_col)
-        cam_header.pack(fill="x", pady=(0, 5))
+        # Google-Status (rechts oben)
+        auth_box = tk.Frame(header, bg=t["card"], highlightthickness=1,
+                            highlightbackground=t["border"])
+        auth_box.pack(side="right", anchor="center")
+        auth_inner = tk.Frame(auth_box, bg=t["card"])
+        auth_inner.pack(padx=12, pady=8)
+        self.lbl_auth_dot = tk.Label(auth_inner, text="●", bg=t["card"], fg=t["faint"],
+                                     font=(FONT, 14))
+        self.lbl_auth_dot.pack(side="left")
+        self.lbl_auth_text = tk.Label(auth_inner, text="Google Health: prüfe Anmeldung…",
+                                      bg=t["card"], fg=t["text"], font=(FONT, 11))
+        self.lbl_auth_text.pack(side="left", padx=(6, 0))
+        self.btn_login = ModernButton(
+            auth_inner, text="Anmelden", command=self.start_login,
+            font=(FONT, 11, "bold"), padx=10, pady=4
+        )
+        # wird nur bei Bedarf eingeblendet
 
-        ttk.Label(cam_header, text="📹 Kamera (180° gedreht, Weißfilter)", font=("Helvetica", 12, "bold")).pack(side="left")
+        # ==================== INHALT: 2 Spalten ====================
+        content = tk.Frame(outer, bg=t["bg"])
+        content.pack(fill="both", expand=True)
+        content.columnconfigure(0, weight=0)
+        content.columnconfigure(1, weight=1)
+        content.rowconfigure(0, weight=1)
+
+        left_col = tk.Frame(content, bg=t["bg"])
+        left_col.grid(row=0, column=0, sticky="nsew", padx=(0, 14))
+        right_col = tk.Frame(content, bg=t["bg"])
+        right_col.grid(row=0, column=1, sticky="nsew")
+
+        # ---------- Kamera-Karte ----------
+        cam_card, cam = make_card(left_col)
+        cam_card.pack(fill="x")
+
+        cam_header = tk.Frame(cam, bg=t["card"])
+        cam_header.pack(fill="x", pady=(0, 8))
+        tk.Label(cam_header, text="KAMERA", bg=t["card"], fg=t["muted"],
+                 font=(FONT, 10, "bold")).pack(side="left")
 
         self.cam_names = [name for _, name in KNOWN_CAMERAS]
         default_str = self.cam_names[0]
@@ -1012,19 +1194,21 @@ class WalkingPadApp:
                 default_str = name
                 break
 
-        self.combo_cam = ttk.Combobox(cam_header, values=self.cam_names, state="readonly", width=28)
+        self.combo_cam = ttk.Combobox(cam_header, values=self.cam_names, state="readonly",
+                                      width=26, style="Dark.TCombobox")
         self.combo_cam.set(default_str)
         self.combo_cam.pack(side="right")
         self.combo_cam.bind("<<ComboboxSelected>>", self.on_camera_combo_change)
 
         # Video-Container mit fester Größe (verhindert Aufblähen)
-        self.video_w = 460
-        self.video_h = 300
-        video_container = tk.Frame(left_col, width=self.video_w, height=self.video_h, bg="#111827")
-        video_container.pack(fill="both", expand=False)
+        self.video_w = 520
+        self.video_h = 325
+        video_container = tk.Frame(cam, width=self.video_w, height=self.video_h, bg=t["video_bg"])
+        video_container.pack()
         video_container.pack_propagate(False)
 
-        self.lbl_video = tk.Label(video_container, bg="#111827", text="Initialisiere Kamera...", fg="#9CA3AF")
+        self.lbl_video = tk.Label(video_container, bg=t["video_bg"], text="Initialisiere Kamera…",
+                                  fg=t["muted"], font=(FONT, 12), cursor="crosshair")
         self.lbl_video.pack(fill="both", expand=True)
 
         # Maus-Interaktion für ROI
@@ -1033,136 +1217,229 @@ class WalkingPadApp:
         self.lbl_video.bind("<ButtonRelease-1>", self.on_mouse_up)
 
         # Steuerung unter dem Video
-        ctrl_bar = ttk.Frame(left_col)
-        ctrl_bar.pack(fill="x", pady=4)
+        ctrl_bar = tk.Frame(cam, bg=t["card"])
+        ctrl_bar.pack(fill="x", pady=(10, 0))
+        tk.Label(ctrl_bar, text="Rahmen mit der Maus neu aufziehen", bg=t["card"],
+                 fg=t["faint"], font=(FONT, 10)).pack(side="left")
+        ghost_button(ctrl_bar, "Kamera-Freigabe", self.open_camera_settings).pack(side="right")
+        ghost_button(ctrl_bar, "Rahmen zurücksetzen", self.reset_roi).pack(side="right", padx=(0, 6))
 
-        ttk.Button(ctrl_bar, text="🎯 Bereich zentrieren", command=self.reset_roi).pack(side="left")
-        ttk.Button(ctrl_bar, text="⚙️ Kamera-Freigabe", command=self.open_camera_settings).pack(side="right")
-        ttk.Label(
-            ctrl_bar,
-            text="📌 Fester Rahmen (mit Maus verschiebbar)",
-            foreground="#059669",
-            font=("Helvetica", 9, "bold")
-        ).pack(side="left", padx=8)
+        # ---------- Erkennungs-Karte ----------
+        ocr_card, ocr = make_card(left_col, "Erkennung")
+        ocr_card.pack(fill="x", pady=(14, 0))
 
-        # Live-OCR-Debug-Box
-        ocr_box = ttk.LabelFrame(left_col, text="🔍 Live aus Display abgelesen (7-Segment Filter)", padding=8)
-        ocr_box.pack(fill="x", pady=(4, 0))
+        preview_row = tk.Frame(ocr, bg=t["card"])
+        preview_row.pack(fill="x")
 
-        preview_row = ttk.Frame(ocr_box)
-        preview_row.pack(fill="x", pady=2)
+        thresh_box = tk.Frame(preview_row, bg=t["video_bg"], width=160, height=56)
+        thresh_box.pack(side="left", padx=(0, 12))
+        thresh_box.pack_propagate(False)
+        self.lbl_thresh_preview = tk.Label(thresh_box, bg=t["video_bg"], text="Warte auf Signal…",
+                                           fg=t["faint"], font=(FONT, 10))
+        self.lbl_thresh_preview.pack(fill="both", expand=True)
 
-        self.lbl_thresh_preview = tk.Label(
-            preview_row,
-            bg="#111827",
-            text="Warten auf\nSignal...",
-            fg="#9CA3AF",
-            font=("Helvetica", 9),
-            width=20,
-            height=3
-        )
-        self.lbl_thresh_preview.pack(side="left", padx=(0, 10))
-
-        info_sub = ttk.Frame(preview_row)
+        info_sub = tk.Frame(preview_row, bg=t["card"])
         info_sub.pack(side="left", fill="both", expand=True)
+        self.lbl_ocr_status = tk.Label(info_sub, text="Warte auf Display-Signal…", bg=t["card"],
+                                       fg=t["info"], font=(FONT, 12, "bold"),
+                                       anchor="w", justify="left", wraplength=320)
+        self.lbl_ocr_status.pack(anchor="w", fill="x")
+        self.lbl_ocr_raw = tk.Label(info_sub, text="Roh-Text: \"--\"", bg=t["card"], fg=t["faint"],
+                                    font=("Menlo", 10), anchor="w")
+        self.lbl_ocr_raw.pack(anchor="w", fill="x", pady=(4, 0))
 
-        self.lbl_ocr_status = ttk.Label(
-            info_sub,
-            text="Warten auf Display-Signal...",
-            font=("Helvetica", 10, "bold"),
-            foreground="#2563EB"
-        )
-        self.lbl_ocr_status.pack(anchor="w", pady=1)
+        # ---------- Trainings-Karte (rechts) ----------
+        train_card, train = make_card(right_col, "Training")
+        train_card.pack(fill="both", expand=True)
 
-        self.lbl_ocr_raw = ttk.Label(info_sub, text="Roh-Text: \"--\"", font=("Courier", 9), foreground="#4B5563")
-        self.lbl_ocr_raw.pack(anchor="w", pady=1)
+        tiles = tk.Frame(train, bg=t["card"])
+        tiles.pack(fill="x")
+        tiles.columnconfigure(0, weight=1, uniform="tile")
+        tiles.columnconfigure(1, weight=1, uniform="tile")
 
-        # ==================== RECHTE SPALTE: Textfelder & Senden ====================
-        manual_box = ttk.LabelFrame(right_col, text="Automatisch befüllte Trainingsdaten", padding=12)
-        manual_box.pack(fill="both", expand=True)
+        self.tile_duration = MetricTile(tiles, "Dauer", "min:sek", "00:00")
+        self.tile_speed = MetricTile(tiles, "Tempo", "km/h", "0.0")
+        self.tile_distance = MetricTile(tiles, "Distanz", "km", "0.00")
+        self.tile_steps = MetricTile(tiles, "Schritte", "", "0")
+        self.tile_duration.grid(row=0, column=0, sticky="nsew", padx=(0, 5), pady=(0, 10))
+        self.tile_speed.grid(row=0, column=1, sticky="nsew", padx=(5, 0), pady=(0, 10))
+        self.tile_distance.grid(row=1, column=0, sticky="nsew", padx=(0, 5))
+        self.tile_steps.grid(row=1, column=1, sticky="nsew", padx=(5, 0))
 
-        ttk.Label(
-            manual_box,
-            text="Die Felder füllen sich automatisch, wenn das Display\ndie Werte (TIME, SPD, DIST, STEP) durchschaltet.",
-            font=("Helvetica", 9, "italic"),
-            foreground="#4B5563"
-        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        # Kompatible Namen für die bestehende Logik
+        self.entry_duration = self.tile_duration.entry
+        self.entry_speed = self.tile_speed.entry
+        self.entry_distance = self.tile_distance.entry
+        self.entry_steps = self.tile_steps.entry
 
-        row = 1
-        pad_y = 6
-
-        # 1. Dauer (TIME im Format mm:ss bzw. hh:mm)
-        self.lbl_duration_title = ttk.Label(manual_box, text="Dauer (Min:Sek):", font=("Helvetica", 11, "bold"))
-        self.lbl_duration_title.grid(row=row, column=0, sticky="w", pady=pad_y)
-        self.entry_duration = ttk.Entry(manual_box, width=14, font=("Helvetica", 11))
-        self.entry_duration.grid(row=row, column=1, sticky="e", pady=pad_y)
-        self.entry_duration.insert(0, "00:00")
-        row += 1
+        # Startzeit + Stunden-Umschalter
+        opts = tk.Frame(train, bg=t["card"])
+        opts.pack(fill="x", pady=(16, 0))
+        tk.Label(opts, text="Startzeit", bg=t["card"], fg=t["muted"],
+                 font=(FONT, 12)).pack(side="left")
+        self.entry_time = make_entry(opts, font_size=14, width=6)
+        self.entry_time.pack(side="left", padx=(10, 6), ipady=3)
+        self.entry_time.insert(0, datetime.now().strftime("%H:%M"))
+        tk.Label(opts, text="Uhr", bg=t["card"], fg=t["faint"], font=(FONT, 11)).pack(side="left")
 
         self.chk_over_60 = ttk.Checkbutton(
-            manual_box,
-            text="> 60 Min. (hh:mm)",
-            variable=self.var_over_60,
-            command=self.on_over_60_toggled
+            opts, text="über 60 Min. (hh:mm)", variable=self.var_over_60,
+            command=self.on_over_60_toggled, style="Dark.TCheckbutton"
         )
-        self.chk_over_60.grid(row=row, column=1, sticky="e", pady=(0, 4))
-        row += 1
+        self.chk_over_60.pack(side="right")
 
-        # 2. Tempo (SPD)
-        ttk.Label(manual_box, text="Tempo (km/h):", font=("Helvetica", 11, "bold")).grid(row=row, column=0, sticky="w", pady=pad_y)
-        self.entry_speed = ttk.Entry(manual_box, width=14, font=("Helvetica", 11))
-        self.entry_speed.grid(row=row, column=1, sticky="e", pady=pad_y)
-        self.entry_speed.insert(0, "0.0")
-        row += 1
+        tk.Label(train, text="Die Werte füllen sich automatisch, sobald das Display TIME, SPD, DIST "
+                             "und STEP durchschaltet. Du kannst sie jederzeit überschreiben.",
+                 bg=t["card"], fg=t["faint"], font=(FONT, 10), justify="left",
+                 wraplength=400, anchor="w").pack(fill="x", pady=(14, 0))
 
-        # 3. Distanz (DIST)
-        ttk.Label(manual_box, text="Distanz (km):", font=("Helvetica", 11, "bold")).grid(row=row, column=0, sticky="w", pady=pad_y)
-        self.entry_distance = ttk.Entry(manual_box, width=14, font=("Helvetica", 11))
-        self.entry_distance.grid(row=row, column=1, sticky="e", pady=pad_y)
-        self.entry_distance.insert(0, "0.00")
-        row += 1
+        # Aktionen (unten in der Karte)
+        actions = tk.Frame(train, bg=t["card"])
+        actions.pack(side="bottom", fill="x")
 
-        # 4. Schritte (STEP)
-        ttk.Label(manual_box, text="Schritte:", font=("Helvetica", 11, "bold")).grid(row=row, column=0, sticky="w", pady=pad_y)
-        self.entry_steps = ttk.Entry(manual_box, width=14, font=("Helvetica", 11))
-        self.entry_steps.grid(row=row, column=1, sticky="e", pady=pad_y)
-        self.entry_steps.insert(0, "0")
-        row += 1
-
-        # 5. Startzeit
-        ttk.Label(manual_box, text="Startzeit (HH:MM):", font=("Helvetica", 10)).grid(row=row, column=0, sticky="w", pady=pad_y)
-        self.entry_time = ttk.Entry(manual_box, width=14, font=("Helvetica", 10))
-        self.entry_time.grid(row=row, column=1, sticky="e", pady=pad_y)
-        default_start = datetime.now().strftime("%H:%M")
-        self.entry_time.insert(0, default_start)
-        row += 1
-
-        # Reset-Button
-        btn_clear = ttk.Button(manual_box, text="🧹 Felder auf 0 setzen", command=self.clear_fields)
-        btn_clear.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(10, 4))
-        row += 1
-
-        # Großer Senden-Button (sattes Smaragdgrün mit strahlend weißer Schrift, perfekt lesbar auf macOS)
         self.btn_submit = ModernButton(
-            manual_box,
-            text="🚀 Training an Google Health senden",
-            command=self.submit_data,
-            bg="#059669",
-            hover_bg="#047857",
-            fg="#FFFFFF",
-            font=("Helvetica", 12, "bold")
+            actions, text="An Google Health senden  →", command=self.submit_data,
+            font=(FONT, 15, "bold"), pady=14
         )
-        self.btn_submit.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(15, 5))
-        row += 1
+        self.btn_submit.pack(fill="x")
+        ghost_button(actions, "Neues Training – Werte zurücksetzen", self.clear_fields).pack(
+            fill="x", pady=(8, 0))
 
-        # Version & Git-Commit Statuszeile
-        lbl_version = ttk.Label(
-            manual_box,
-            text=f"Version: Git Commit {self.commit_id}",
-            font=("Helvetica", 8),
-            foreground="#9CA3AF"
-        )
-        lbl_version.grid(row=row, column=0, columnspan=2, sticky="e", pady=(4, 0))
+        # Klick außerhalb eines Eingabefelds nimmt den Fokus weg
+        def _blur(event):
+            try:
+                if not isinstance(event.widget, (tk.Entry, ttk.Entry, ttk.Combobox)):
+                    event.widget.winfo_toplevel().focus_set()
+            except Exception:
+                pass
+        self.root.bind_all("<Button-1>", _blur, add="+")
+
+        # ==================== FUSSZEILE ====================
+        tk.Label(outer, text=f"Version {self.commit_id}", bg=t["bg"], fg=t["faint"],
+                 font=(FONT, 9)).pack(anchor="e", pady=(8, 0))
+
+    # -----------------------------------------------------------------------
+    # Google-Anmeldung: Prüfung beim Start & Login per Button
+    # -----------------------------------------------------------------------
+    def _set_auth_ui(self, state: str, text: Optional[str] = None):
+        self.auth_state = state
+        colors = {
+            AUTH_OK: THEME["accent"],
+            AUTH_LOGIN_REQUIRED: THEME["warn"],
+            AUTH_OFFLINE: THEME["warn"],
+            AUTH_NO_CLIENT_SECRET: THEME["error"],
+            "pending": THEME["info"],
+            "error": THEME["error"],
+        }
+        texts = {
+            AUTH_OK: "Google Health verbunden",
+            AUTH_LOGIN_REQUIRED: "Google-Anmeldung erforderlich",
+            AUTH_OFFLINE: "Google nicht erreichbar",
+            AUTH_NO_CLIENT_SECRET: "client_secret.json fehlt",
+            "pending": "Warte auf Anmeldung im Browser…",
+            "error": "Anmeldung fehlgeschlagen",
+        }
+        self.lbl_auth_dot.configure(fg=colors.get(state, THEME["faint"]))
+        self.lbl_auth_text.configure(text=text or texts.get(state, state))
+
+        show_btn = state in (AUTH_LOGIN_REQUIRED, AUTH_OFFLINE, "error")
+        if show_btn:
+            self.btn_login.config(text="Erneut prüfen" if state == AUTH_OFFLINE else "Anmelden")
+            if not self.btn_login.winfo_ismapped():
+                self.btn_login.pack(side="left", padx=(12, 0))
+        elif self.btn_login.winfo_ismapped():
+            self.btn_login.pack_forget()
+
+    def check_auth(self, prompt_login: bool = False):
+        """Prüft im Hintergrund (ohne Browser), ob der Google-Login noch gültig ist."""
+        if self.login_in_progress:
+            return
+
+        def _worker():
+            state, _ = try_silent_credentials()
+            self.root.after(0, lambda: self._on_auth_checked(state, prompt_login))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_auth_checked(self, state: str, prompt_login: bool):
+        self._set_auth_ui(state)
+        if state == AUTH_LOGIN_REQUIRED and prompt_login:
+            if messagebox.askyesno(
+                "Google-Anmeldung",
+                "Deine Google-Anmeldung ist abgelaufen oder fehlt.\n\n"
+                "Jetzt im Browser anmelden, damit das Senden an Google Health später direkt klappt?",
+                parent=self.root,
+            ):
+                self.start_login()
+        # Regelmäßig still nachprüfen, damit der Status aktuell bleibt
+        if getattr(self, "_auth_recheck_job", None):
+            self.root.after_cancel(self._auth_recheck_job)
+        self._auth_recheck_job = self.root.after(AUTH_RECHECK_MS, self.check_auth)
+
+    def start_login(self):
+        """Startet den Browser-Login (oder prüft erneut, falls offline)."""
+        if self.login_in_progress:
+            return
+        if self.auth_state == AUTH_OFFLINE:
+            self._set_auth_ui("pending", "Prüfe Verbindung…")
+            self.check_auth(prompt_login=True)
+            return
+
+        self.login_in_progress = True
+        self._set_auth_ui("pending")
+
+        def _worker():
+            try:
+                interactive_login()
+                result, err = AUTH_OK, None
+            except Exception as e:
+                result, err = "error", str(e)
+            self.root.after(0, lambda: self._on_login_done(result, err))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_login_done(self, state: str, err: Optional[str]):
+        self.login_in_progress = False
+        self._set_auth_ui(state)
+        if err:
+            messagebox.showerror("Google-Anmeldung", f"Die Anmeldung hat nicht geklappt:\n{err}",
+                                 parent=self.root)
+
+    def on_over_60_toggled(self, recalc: bool = True):
+        is_over = self.var_over_60.get()
+        self.tile_duration.set_unit("std:min" if is_over else "min:sek")
+
+        # Duration-Kandidaten im Stabilizer zurücksetzen, damit kein Frame-Filter blockiert
+        self.stabilizer.candidates.pop("duration", None)
+
+        if recalc:
+            try:
+                curr_str = self.entry_duration.get().strip()
+                if curr_str and curr_str != "00:00":
+                    dur_min = parse_duration_to_minutes(curr_str, is_over_60=is_over)
+                    new_time = (datetime.now() - timedelta(minutes=dur_min)).strftime("%H:%M")
+                    self.entry_time.delete(0, tk.END)
+                    self.entry_time.insert(0, new_time)
+            except Exception:
+                pass
+
+    def clear_fields(self):
+        self.stabilizer.reset()
+        self.var_over_60.set(False)
+        self.tile_duration.set_unit("min:sek")
+        self.entry_duration.delete(0, tk.END)
+        self.entry_duration.insert(0, "00:00")
+        self.entry_speed.delete(0, tk.END)
+        self.entry_speed.insert(0, "0.0")
+        self.entry_distance.delete(0, tk.END)
+        self.entry_distance.insert(0, "0.00")
+        self.entry_steps.delete(0, tk.END)
+        self.entry_steps.insert(0, "0")
+        self.entry_time.delete(0, tk.END)
+        self.entry_time.insert(0, datetime.now().strftime("%H:%M"))
+        self.last_ocr_data = {"time_str": None, "duration_min": None, "distance": None, "speed": None, "steps": None, "raw": "-"}
+        self.lbl_ocr_status.config(text="Werte zurückgesetzt – bereit für das nächste Training.",
+                                   fg=THEME["info"])
 
     def on_camera_combo_change(self, event=None):
         val = self.combo_cam.get()
@@ -1210,9 +1487,9 @@ class WalkingPadApp:
                 text="⚠️ Kamera nicht autorisiert oder nicht verbunden!\n\n"
                      "1. Öffne Systemeinstellungen -> Datenschutz & Sicherheit -> Kamera\n"
                      "2. Erlaube dort 'WalkingPad Sync' bzw. 'Python'.\n\n"
-                     "(Klicke unten auf '⚙️ Kamera-Freigabe')",
-                fg="#F87171",
-                font=("Helvetica", 10, "bold"),
+                     "(Klicke unten auf 'Kamera-Freigabe')",
+                fg=THEME["error"],
+                font=(FONT, 12, "bold"),
                 wraplength=380,
                 justify="center"
             )
@@ -1227,43 +1504,6 @@ class WalkingPadApp:
             except Exception:
                 pass
             self.cap = None
-
-    def on_over_60_toggled(self, recalc: bool = True):
-        is_over = self.var_over_60.get()
-        if is_over:
-            self.lbl_duration_title.config(text="Dauer (Std:Min):")
-        else:
-            self.lbl_duration_title.config(text="Dauer (Min:Sek):")
-
-        # Duration-Kandidaten im Stabilizer zurücksetzen, damit kein Frame-Filter blockiert
-        self.stabilizer.candidates.pop("duration", None)
-
-        if recalc:
-            try:
-                curr_str = self.entry_duration.get().strip()
-                if curr_str and curr_str != "00:00":
-                    dur_min = parse_duration_to_minutes(curr_str, is_over_60=is_over)
-                    new_time = (datetime.now() - timedelta(minutes=dur_min)).strftime("%H:%M")
-                    self.entry_time.delete(0, tk.END)
-                    self.entry_time.insert(0, new_time)
-            except Exception:
-                pass
-
-    def clear_fields(self):
-        self.stabilizer.reset()
-        self.var_over_60.set(False)
-        self.lbl_duration_title.config(text="Dauer (Min:Sek):")
-        self.entry_duration.delete(0, tk.END)
-        self.entry_duration.insert(0, "00:00")
-        self.entry_speed.delete(0, tk.END)
-        self.entry_speed.insert(0, "0.0")
-        self.entry_distance.delete(0, tk.END)
-        self.entry_distance.insert(0, "0.00")
-        self.entry_steps.delete(0, tk.END)
-        self.entry_steps.insert(0, "0")
-        self.entry_time.delete(0, tk.END)
-        self.entry_time.insert(0, datetime.now().strftime("%H:%M"))
-        self.last_ocr_data = {"time_str": None, "duration_min": None, "distance": None, "speed": None, "steps": None, "raw": "-"}
 
     # -----------------------------------------------------------------------
     # Maus-Interaktion für ROI (falls nötig verschiebbar)
@@ -1427,8 +1667,7 @@ class WalkingPadApp:
                 if not time_display:
                     time_display = format_duration_display(filtered_dur, is_over_60=self.var_over_60.get())
 
-                self.entry_duration.delete(0, tk.END)
-                self.entry_duration.insert(0, time_display)
+                self._set_tile(self.tile_duration, time_display)
                 self.last_ocr_data["duration_min"] = filtered_dur
                 self.last_ocr_data["time_str"] = time_display
                 status_parts.append(f"Zeit: {time_display}")
@@ -1441,8 +1680,7 @@ class WalkingPadApp:
         if parsed["speed"] is not None:
             filtered_spd = self.stabilizer.filter_speed(parsed["speed"])
             if filtered_spd is not None:
-                self.entry_speed.delete(0, tk.END)
-                self.entry_speed.insert(0, f"{filtered_spd:.1f}")
+                self._set_tile(self.tile_speed, f"{filtered_spd:.1f}")
                 self.last_ocr_data["speed"] = filtered_spd
                 status_parts.append(f"Tempo: {filtered_spd:.1f} km/h")
 
@@ -1455,8 +1693,7 @@ class WalkingPadApp:
 
             filtered_dist = self.stabilizer.filter_distance(parsed["distance"], curr_dist)
             if filtered_dist is not None:
-                self.entry_distance.delete(0, tk.END)
-                self.entry_distance.insert(0, f"{filtered_dist:.2f}")
+                self._set_tile(self.tile_distance, f"{filtered_dist:.2f}")
                 self.last_ocr_data["distance"] = filtered_dist
                 status_parts.append(f"Distanz: {filtered_dist:.2f} km")
 
@@ -1469,17 +1706,25 @@ class WalkingPadApp:
 
             filtered_steps = self.stabilizer.filter_steps(parsed["steps"], curr_steps)
             if filtered_steps is not None:
-                self.entry_steps.delete(0, tk.END)
-                self.entry_steps.insert(0, str(filtered_steps))
+                self._set_tile(self.tile_steps, str(filtered_steps))
                 self.last_ocr_data["steps"] = filtered_steps
                 status_parts.append(f"Schritte: {filtered_steps}")
 
         if status_parts:
             self.lbl_ocr_status.config(
-                text=f"✅ Erkannt: {' | '.join(status_parts)}",
-                foreground="#059669"
+                text=f"✓ Erkannt  ·  {'  ·  '.join(status_parts)}",
+                fg=THEME["accent"]
             )
         self.lbl_ocr_raw.config(text=f"Roh-Text: \"{parsed['raw']}\"")
+
+    def _set_tile(self, tile: "MetricTile", text: str) -> None:
+        """Schreibt einen erkannten Wert in die Kachel (nicht während der Nutzer tippt)."""
+        if tile.focus_get() is tile.entry:
+            return
+        if tile.entry.get() != text:
+            tile.entry.delete(0, tk.END)
+            tile.entry.insert(0, text)
+            tile.flash()
 
     def submit_data(self):
         """Öffnet den bearbeitbaren Bestätigungsdialog und sendet bei Bestätigung an Google Health v4."""
@@ -1510,7 +1755,7 @@ class WalkingPadApp:
 
         # Aktualisiere die Haupt-GUI-Felder mit den eventuell im Dialog editierten Werten
         self.var_over_60.set(res["is_over_60"])
-        self.lbl_duration_title.config(text="Dauer (Std:Min):" if res["is_over_60"] else "Dauer (Min:Sek):")
+        self.tile_duration.set_unit("std:min" if res["is_over_60"] else "min:sek")
 
         self.entry_duration.delete(0, tk.END)
         self.entry_duration.insert(0, res["duration_str"])
@@ -1528,7 +1773,7 @@ class WalkingPadApp:
         self.entry_time.insert(0, res["start_time_str"])
 
         # Senden-Button deaktivieren und Upload starten
-        self.btn_submit.config(state="disabled", text="⏳ Wird an Google Health gesendet...")
+        self.btn_submit.config(state="disabled", text="Wird gesendet …")
 
         def _upload():
             success, msg = upload_workout_data(
@@ -1543,7 +1788,8 @@ class WalkingPadApp:
         threading.Thread(target=_upload, daemon=True).start()
 
     def _on_submit_done(self, success: bool, msg: str):
-        self.btn_submit.config(state="normal", text="🚀 Training an Google Health senden")
+        self.btn_submit.config(state="normal", text="An Google Health senden  →")
+        self.check_auth()  # Login-Status nach dem Senden aktualisieren
         if success:
             messagebox.showinfo("Google Health Bestätigung 🎉", msg, parent=self.root)
         else:

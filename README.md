@@ -112,7 +112,9 @@ pip install opencv-python pillow pytesseract requests google-auth google-auth-oa
    ```
    client_secret.json
    ```
-*(Beim ersten Senden öffnet sich der Browser zur Anmeldung; der Login wird in `token.json` gespeichert).*
+*(Beim App-Start wird der Google-Login geprüft. Fehlt er oder ist er abgelaufen, bietet die App direkt die Anmeldung im Browser an; der Status steht oben rechts im Fenster. Der Login wird in `token.json` gespeichert.)*
+
+> **Hinweis zur Token-Laufzeit:** Steht der OAuth-Zustimmungsbildschirm in der Cloud Console auf **„Testing“**, laufen Refresh-Tokens nach **7 Tagen** ab – dann ist eine erneute Anmeldung nötig. Mit **Google Auth Platform → Zielgruppe → „App veröffentlichen“** (Status „In Produktion“) bleibt der Login dauerhaft gültig. Die Warnung „App nicht überprüft“ kann bei Eigennutzung über *Erweitert → Weiter zu …* übersprungen werden.
 
 ---
 
